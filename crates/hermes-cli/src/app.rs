@@ -867,10 +867,14 @@ impl HermesApp {
                 _platform: Platform,
                 chat_id: &str,
                 content: &str,
+                model_override: Option<&str>,
             ) -> std::result::Result<hermes_gateway::runner::HandlerResult, String> {
                 tracing::info!("Gateway received from {chat_id}: {}", content.chars().take(50).collect::<String>());
 
                 let mut agent = self.agent.lock().await;
+                if let Some(model) = model_override {
+                    agent.switch_model(model, None, None, None);
+                }
                 let turn_result = agent.run_conversation(content, None, None).await;
                 if turn_result.response.is_empty() {
                     Err("Agent returned no response".to_string())

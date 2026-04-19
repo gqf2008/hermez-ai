@@ -1523,6 +1523,7 @@ impl WeComAdapter {
                                             crate::config::Platform::Wecom,
                                             &event_chat_id,
                                             &event.content,
+                                            None,
                                         )
                                         .await
                                     {

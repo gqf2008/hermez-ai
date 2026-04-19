@@ -1018,6 +1018,7 @@ async fn chat_completions_handler(
             Platform::ApiServer,
             &session_id,
             &user_message,
+            None,
         )
         .await
         .map_err(|e| {
@@ -1230,6 +1231,7 @@ async fn responses_handler(
             Platform::ApiServer,
             &session_id,
             &user_message,
+            None,
         )
         .await
         .map_err(|e| {
@@ -1388,7 +1390,7 @@ async fn responses_stream_handler(
     tokio::spawn(async move {
         let handler_guard = handler.lock().await;
         let result = match handler_guard.as_ref() {
-            Some(h) => h.handle_message(Platform::ApiServer, &sess_id, &user_msg_spawn).await,
+            Some(h) => h.handle_message(Platform::ApiServer, &sess_id, &user_msg_spawn, None).await,
             None => Err("No message handler registered".to_string()),
         };
         let _ = tx.send(result);
@@ -1847,7 +1849,7 @@ async fn run_and_close(
 
     let handler_guard = state.handler.lock().await;
     let result = if let Some(handler) = handler_guard.as_ref() {
-        handler.handle_message(Platform::ApiServer, &session_id, &user_message).await
+        handler.handle_message(Platform::ApiServer, &session_id, &user_message, None).await
     } else {
         Err("No message handler registered".to_string())
     };

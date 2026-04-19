@@ -79,6 +79,7 @@ pub trait MessageHandler: Send + Sync + 'static {
         platform: Platform,
         chat_id: &str,
         content: &str,
+        model_override: Option<&str>,
     ) -> Result<HandlerResult, String>;
 
     /// Signal the handler to interrupt its current conversation turn.
@@ -561,7 +562,8 @@ impl GatewayRunner {
                                 sessions.insert(chat_id.clone(), now);
                             }
 
-                            match h.handle_message(Platform::Slack, chat_id, content).await {
+                            let model_override = per_chat_model.lock().get(chat_id).cloned();
+                            match h.handle_message(Platform::Slack, chat_id, content, model_override.as_deref()).await {
                                 Ok(result) => {
                                     running_sessions.lock().remove(chat_id);
                                     busy_ack_ts.lock().remove(chat_id);
@@ -718,11 +720,13 @@ impl GatewayRunner {
                                             sessions.insert(chat_id.clone(), now);
                                         }
 
+                                        let model_override = per_chat_model.lock().get(chat_id).cloned();
                                         match h
                                             .handle_message(
                                                 Platform::Feishu,
                                                 chat_id,
                                                 content,
+                                                model_override.as_deref(),
                                             )
                                             .await
                                         {
@@ -1471,8 +1475,9 @@ async fn route_weixin_message(
         return;
     };
 
+    let model_override = per_chat_model.lock().get(chat_id).cloned();
     match handler_ref
-        .handle_message(Platform::Weixin, chat_id, &event.content)
+        .handle_message(Platform::Weixin, chat_id, &event.content, model_override.as_deref())
         .await
     {
         Ok(result) => {
@@ -1683,8 +1688,9 @@ async fn route_telegram_message(
         return;
     };
 
+    let model_override = per_chat_model.lock().get(chat_id).cloned();
     match handler_ref
-        .handle_message(Platform::Telegram, chat_id, &event.content)
+        .handle_message(Platform::Telegram, chat_id, &event.content, model_override.as_deref())
         .await
     {
         Ok(result) => {
@@ -2028,8 +2034,9 @@ async fn route_whatsapp_message(
         return;
     };
 
+    let model_override = per_chat_model.lock().get(chat_id).cloned();
     match handler_ref
-        .handle_message(Platform::Whatsapp, chat_id, &event.content)
+        .handle_message(Platform::Whatsapp, chat_id, &event.content, model_override.as_deref())
         .await
     {
         Ok(result) => {
@@ -2236,8 +2243,9 @@ async fn route_email_message(
         return;
     };
 
+    let model_override = per_chat_model.lock().get(chat_id).cloned();
     match handler_ref
-        .handle_message(Platform::Email, chat_id, content)
+        .handle_message(Platform::Email, chat_id, content, model_override.as_deref())
         .await
     {
         Ok(result) => {
@@ -2453,8 +2461,9 @@ async fn route_qqbot_message(
         return;
     };
 
+    let model_override = per_chat_model.lock().get(chat_id).cloned();
     match handler_ref
-        .handle_message(Platform::Qqbot, chat_id, &event.content)
+        .handle_message(Platform::Qqbot, chat_id, &event.content, model_override.as_deref())
         .await
     {
         Ok(result) => {

@@ -576,6 +576,7 @@ async fn webhook_handler(
                         crate::config::Platform::Dingtalk,
                         &event.chat_id,
                         &event.content,
+                        None,
                     )
                     .await
                 {

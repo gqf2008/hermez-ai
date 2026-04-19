@@ -637,7 +637,7 @@ async fn handle_webhook(
             sessions.insert(chat_id.clone(), now);
         }
 
-        match handler_ref.handle_message(Platform::Webhook, &chat_id, &prompt).await {
+        match handler_ref.handle_message(Platform::Webhook, &chat_id, &prompt, None).await {
             Ok(result) => {
                 running_sessions.lock().remove(&chat_id);
                 busy_ack_ts.lock().remove(&chat_id);

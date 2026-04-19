@@ -783,6 +783,7 @@ impl FeishuWsClient {
                             crate::config::Platform::Feishu,
                             chat_id,
                             &final_text,
+                            None,
                         )
                         .await
                     {

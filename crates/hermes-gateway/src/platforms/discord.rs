@@ -309,7 +309,7 @@ impl DiscordAdapter {
                                                     let platform = crate::config::Platform::Discord;
                                                     tokio::spawn(async move {
                                                         match h
-                                                            .handle_message(platform, &chat_id, &content)
+                                                            .handle_message(platform, &chat_id, &content, None)
                                                             .await
                                                         {
                                                             Ok(result) => {
