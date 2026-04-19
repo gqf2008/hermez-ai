@@ -53,6 +53,7 @@ pub mod setup_cmd;
 pub mod skin_engine;
 pub mod skills_hub_cmd;
 pub mod status_cmd;
+pub mod swe_cmd;
 pub mod tools_cmd;
 pub mod uninstall_cmd;
 pub mod update_cmd;

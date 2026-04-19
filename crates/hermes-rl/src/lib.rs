@@ -19,6 +19,7 @@ pub mod math_env;
 pub mod tool_use_env;
 pub mod atropos_env;
 pub mod web_research_env;
+pub mod swe_env;
 
 pub use base::{
     AgentResult, AgentLoopConfig, Environment, EnvironmentConfig,

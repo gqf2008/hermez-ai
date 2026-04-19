@@ -193,6 +193,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: Option<BatchAction>,
     },
+    /// SWE (Software Engineering) evaluation
+    Swe {
+        #[command(subcommand)]
+        action: Option<SweAction>,
+    },
     /// Manage scheduled cron jobs
     Cron {
         #[command(subcommand)]
@@ -1070,6 +1075,42 @@ pub(crate) enum BatchAction {
         /// Run name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SweAction {
+    /// Run SWE evaluation on a dataset
+    Evaluate {
+        /// Dataset source: path, hf://<name>, or "builtin"
+        #[arg(default_value = "builtin")]
+        dataset: String,
+        /// Dataset split
+        #[arg(short = 't', long, default_value = "test")]
+        split: String,
+        /// Sandbox backend: local or docker
+        #[arg(short = 'b', long, default_value = "local")]
+        sandbox: String,
+        /// Max samples to evaluate
+        #[arg(short = 'n', long, default_value_t = 0)]
+        max_samples: usize,
+        /// Output directory for report
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+        /// Model name (for report metadata)
+        #[arg(long)]
+        model: Option<String>,
+        /// Quick mode: fewer samples, faster
+        #[arg(long)]
+        quick: bool,
+    },
+    /// Run built-in benchmark suite
+    Benchmark {
+        /// Quick mode
+        #[arg(long)]
+        quick: bool,
+    },
+    /// Show environment info and check dependencies
+    Env,
 }
 
 #[derive(Subcommand)]

@@ -335,6 +335,33 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
                 }
             }
         }
+        Some(Commands::Swe { action }) => {
+            match action {
+                Some(SweAction::Evaluate { dataset, split, sandbox, max_samples, output, model, quick }) => {
+                    let opts = hermes_cli::swe_cmd::SweEvaluateOptions {
+                        dataset,
+                        split,
+                        sandbox,
+                        max_samples,
+                        output_dir: output,
+                        model,
+                        quick,
+                    };
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(hermes_cli::swe_cmd::cmd_swe_evaluate(&opts))?;
+                }
+                Some(SweAction::Benchmark { quick }) => {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(hermes_cli::swe_cmd::cmd_swe_benchmark(quick))?;
+                }
+                Some(SweAction::Env) => {
+                    hermes_cli::swe_cmd::cmd_swe_env_info()?;
+                }
+                None => {
+                    hermes_cli::swe_cmd::cmd_swe_env_info()?;
+                }
+            }
+        }
         Some(Commands::Cron { action }) => {
             match action {
                 Some(CronAction::List { all }) => {

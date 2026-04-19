@@ -88,6 +88,7 @@ async-trait = "0.1"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+urlencoding = "2.1"
 
 # OpenAI / Anthropic
 async-openai = "0.27"

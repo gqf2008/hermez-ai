@@ -121,22 +121,92 @@ fn get_category_from_path(skill_md: &Path, skills_dirs: &[PathBuf]) -> Option<St
     None
 }
 
-/// Collect all skill directories to scan (local + external from config).
+/// Collect all skill directories to scan (builtin + local + external from config).
 fn all_skills_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
+    // 1. Builtin skills from HERMES_BUILTIN_SKILLS env var
+    if let Ok(builtin) = std::env::var("HERMES_BUILTIN_SKILLS") {
+        let path = PathBuf::from(builtin);
+        if path.exists() {
+            dirs.push(path);
+        }
+    }
+
+    // 2. Auto-detect builtin skills relative to the executable or workspace
+    if let Some(builtin) = detect_builtin_skills_dir() {
+        if builtin.exists() && !dirs.iter().any(|d| d == &builtin) {
+            dirs.push(builtin);
+        }
+    }
+
+    // 3. Local user skills
     let local = skills_dir();
-    if local.exists() {
+    if local.exists() && !dirs.iter().any(|d| d == &local) {
         dirs.push(local);
     }
-    // External skill dirs from config
+
+    // 4. External skill dirs from config
     if let Ok(config) = hermes_core::config::HermesConfig::load() {
         for path in config.skills.external_dirs {
-            if path.exists() {
+            if path.exists() && !dirs.iter().any(|d| d == &path) {
                 dirs.push(path);
             }
         }
     }
     dirs
+}
+
+/// Detect builtin skills directory by checking common locations.
+///
+/// Resolution order:
+/// 1. Current working directory / skills
+/// 2. Parent of executable directory / skills (for installed binaries)
+/// 3. CARGO_MANIFEST_DIR parent / skills (for cargo run in workspace)
+fn detect_builtin_skills_dir() -> Option<PathBuf> {
+    // Check CWD/skills
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("skills");
+        if candidate.join("software-development").exists() || candidate.join("github").exists() {
+            return Some(candidate);
+        }
+    }
+
+    // Check executable parent/skills
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("skills");
+            if candidate.join("software-development").exists() || candidate.join("github").exists() {
+                return Some(candidate);
+            }
+            // Also check grandparent (typical for target/debug/hermes)
+            if let Some(grandparent) = exe_dir.parent() {
+                let candidate = grandparent.join("skills");
+                if candidate.join("software-development").exists() || candidate.join("github").exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // Check CARGO_MANIFEST_DIR (set during cargo run/build)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let manifest_path = PathBuf::from(manifest_dir);
+        // Try manifest parent (workspace root)
+        if let Some(workspace) = manifest_path.parent() {
+            let candidate = workspace.join("skills");
+            if candidate.join("software-development").exists() || candidate.join("github").exists() {
+                return Some(candidate);
+            }
+        }
+        // Try manifest dir itself
+        let candidate = manifest_path.join("skills");
+        if candidate.join("software-development").exists() || candidate.join("github").exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Get disabled skill names from config.
