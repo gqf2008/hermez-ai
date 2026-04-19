@@ -36,6 +36,7 @@ fn build_hermes_command() -> Command {
                 clap::Arg::new("platform").short('p').long("platform"),
             ]),
             Command::new("commands").about("List skill slash commands"),
+            Command::new("reset").about("Reset skills to factory defaults"),
         ]))
         .subcommand(Command::new("gateway").about("Run messaging gateway").subcommands([
             Command::new("run").about("Run gateway in foreground"),
@@ -44,6 +45,7 @@ fn build_hermes_command() -> Command {
             Command::new("status").about("Show gateway status"),
             Command::new("install").about("Install gateway service"),
             Command::new("uninstall").about("Uninstall gateway service"),
+            Command::new("migrate-legacy").about("Migrate legacy gateway config to new format"),
         ]))
         .subcommand(Command::new("doctor").about("Diagnose configuration"))
         .subcommand(Command::new("models").about("List available models"))
@@ -146,6 +148,9 @@ fn build_hermes_command() -> Command {
         ]))
         .subcommand(Command::new("backup-list").about("List available backups"))
         .subcommand(Command::new("debug").about("Print debug info"))
+        .subcommand(Command::new("debug-delete").about("Delete a debug paste").args([
+            clap::Arg::new("url").required(true),
+        ]))
         .subcommand(Command::new("dump").about("Dump session data").args([
             clap::Arg::new("session_id").value_name("SESSION_ID"),
         ]))

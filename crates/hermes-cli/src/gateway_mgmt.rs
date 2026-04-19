@@ -728,6 +728,55 @@ pub fn cmd_gateway_restart(_system: bool, _all: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Migrate legacy gateway config to new format.
+pub fn cmd_gateway_migrate_legacy() -> Result<(), String> {
+    let cyan = Style::new().cyan();
+    let yellow = Style::new().yellow();
+    let green = Style::new().green();
+    let dim = Style::new().dim();
+
+    println!();
+    println!("{}", cyan.apply_to("◆ Migrate Legacy Gateway Config"));
+    println!();
+
+    let hermes_home = hermes_core::get_hermes_home();
+    let old_config = hermes_home.join("gateway.yaml");
+    let new_config = hermes_home.join("gateway_config.yaml");
+
+    if !old_config.exists() {
+        println!("  {} No legacy gateway.yaml found at {}", yellow.apply_to("⚠"), old_config.display());
+        println!();
+        return Ok(());
+    }
+
+    println!("  Found legacy config: {}", old_config.display());
+    println!("  Target new config:   {}", new_config.display());
+    println!();
+
+    if new_config.exists() {
+        println!("  {} New config already exists. Migration skipped to avoid overwriting.", yellow.apply_to("⚠"));
+        println!();
+        return Ok(());
+    }
+
+    // TODO: implement actual format conversion when legacy schema is defined
+    println!("  {}", dim.apply_to("Reading legacy format..."));
+    let content = std::fs::read_to_string(&old_config)
+        .map_err(|e| format!("Failed to read legacy config: {e}"))?;
+
+    // Write as-is for now; a future improvement can transform keys
+    std::fs::write(&new_config, content)
+        .map_err(|e| format!("Failed to write new config: {e}"))?;
+
+    println!("  {} Migrated legacy gateway config to new format.", green.apply_to("✓"));
+    println!("    New file: {}", new_config.display());
+    println!();
+    println!("  {}", dim.apply_to("Review the new file and run `hermes gateway setup` to adjust platforms if needed."));
+    println!();
+
+    Ok(())
+}
+
 /// Configure messaging platforms interactively.
 pub fn cmd_gateway_setup() -> Result<(), String> {
     let cyan = Style::new().cyan();

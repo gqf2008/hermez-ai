@@ -671,6 +671,67 @@ pub fn cmd_skills_tap_remove(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reset skills to factory defaults.
+pub fn cmd_skills_reset() -> anyhow::Result<()> {
+    let dir = skills_dir();
+
+    println!();
+    println!("{}", cyan().apply_to("◆ Reset Skills"));
+    println!();
+
+    if !dir.exists() {
+        println!("  {}", dim().apply_to("No skills directory found. Nothing to reset."));
+        println!();
+        return Ok(());
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    if entries.is_empty() {
+        println!("  {}", dim().apply_to("No skills installed. Nothing to reset."));
+        println!();
+        return Ok(());
+    }
+
+    println!("  This will remove all {} installed skills from {}", entries.len(), dir.display());
+    print!("  Are you sure? [y/N]: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let confirmed = input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes");
+
+    if !confirmed {
+        println!("  {}", yellow().apply_to("Cancelled."));
+        println!();
+        return Ok(());
+    }
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() || path.is_file() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                if let Err(e2) = std::fs::remove_file(&path) {
+                    println!("  {} Could not remove {}: {e} / {e2}", yellow().apply_to("⚠"), path.display());
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Also clear the skills index
+    let index_path = skills_index_path();
+    if index_path.exists() {
+        let _ = std::fs::remove_file(&index_path);
+    }
+
+    println!("  {} All skills have been reset.", green().apply_to("✓"));
+    println!();
+
+    Ok(())
+}
+
 /// Interactive skill configuration.
 pub fn cmd_skills_config() -> anyhow::Result<()> {
     let index = load_skills_index();

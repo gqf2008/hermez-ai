@@ -137,6 +137,11 @@ pub enum Commands {
         #[arg(long)]
         local_only: bool,
     },
+    /// Delete a previously uploaded debug paste
+    DebugDelete {
+        /// URL of the debug paste to delete
+        url: String,
+    },
     /// Dump session data for debugging
     Dump {
         /// Session ID or prefix
@@ -803,6 +808,8 @@ pub(crate) enum SkillAction {
     },
     /// Interactive skill configuration
     Config,
+    /// Reset skills to factory defaults
+    Reset,
 }
 
 /// Subcommands for skill snapshots.
@@ -1135,6 +1142,8 @@ pub(crate) enum GatewayAction {
     },
     /// Configure messaging platforms
     Setup,
+    /// Migrate legacy gateway config to new format
+    MigrateLegacy,
 }
 
 #[derive(Subcommand)]

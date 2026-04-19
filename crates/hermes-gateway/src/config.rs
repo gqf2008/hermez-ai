@@ -34,6 +34,7 @@ pub enum Platform {
     WecomCallback,
     Weixin,
     Bluebubbles,
+    Qqbot,
 }
 
 impl Platform {
@@ -58,6 +59,7 @@ impl Platform {
             Self::WecomCallback => "wecom_callback",
             Self::Weixin => "weixin",
             Self::Bluebubbles => "bluebubbles",
+            Self::Qqbot => "qqbot",
         }
     }
 }
@@ -95,6 +97,7 @@ impl Platform {
             "wecom_callback" => Some(Self::WecomCallback),
             "weixin" => Some(Self::Weixin),
             "bluebubbles" => Some(Self::Bluebubbles),
+            "qqbot" => Some(Self::Qqbot),
             _ => None,
         }
     }

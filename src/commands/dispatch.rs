@@ -38,6 +38,9 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
         Some(Commands::DebugShare { lines, expire_days, local_only }) => {
             hermes_cli::debug_share_cmd::cmd_debug_share(lines, expire_days, local_only)?;
         }
+        Some(Commands::DebugDelete { url }) => {
+            hermes_cli::debug_cmd::cmd_debug_delete(&url)?;
+        }
         Some(Commands::Dump { session_id, show_keys }) => {
             match session_id {
                 Some(sid) => {
@@ -150,6 +153,9 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
                 Some(SkillAction::Config) => {
                     hermes_cli::skills_hub_cmd::cmd_skills("config", None, None, "all", 10, 1, "", false)?;
                 }
+                Some(SkillAction::Reset) => {
+                    hermes_cli::skills_hub_cmd::cmd_skills_reset()?;
+                }
                 None => app.list_skills()?,
             }
         }
@@ -187,6 +193,10 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
                 }
                 Some(GatewayAction::Setup) => {
                     hermes_cli::gateway_mgmt::cmd_gateway_setup()
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                }
+                Some(GatewayAction::MigrateLegacy) => {
+                    hermes_cli::gateway_mgmt::cmd_gateway_migrate_legacy()
                         .map_err(|e| anyhow::anyhow!(e))?;
                 }
             }

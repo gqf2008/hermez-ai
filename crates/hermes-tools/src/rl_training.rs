@@ -742,6 +742,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[ignore = "requires tinker-atropos checkout in parent directory"]
     fn test_find_atropos_root() {
         // Should find tinker-atropos relative to the workspace
         let root = find_atropos_root();

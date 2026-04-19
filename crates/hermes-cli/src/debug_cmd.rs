@@ -145,6 +145,18 @@ pub fn cmd_debug() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delete a previously uploaded debug paste.
+pub fn cmd_debug_delete(url: &str) -> anyhow::Result<()> {
+    println!();
+    println!("{}", cyan().apply_to("◆ Delete Debug Paste"));
+    println!();
+    println!("  URL: {}", url);
+    println!();
+    println!("  {}", yellow().apply_to("Debug paste deletion not yet implemented."));
+    println!();
+    Ok(())
+}
+
 /// Dump session data for debugging.
 pub fn cmd_dump_session(session_id: &str, _show_keys: bool) -> anyhow::Result<()> {
     let home = get_hermes_home();

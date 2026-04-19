@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
@@ -19,12 +20,14 @@ use crate::platforms::api_server::{ApiServerAdapter, ApiServerConfig, ApiServerS
 use crate::session::{SessionSource, SessionStore, build_session_key};
 use crate::platforms::dingtalk::{DingtalkAdapter, DingtalkConfig};
 use crate::platforms::discord::{DiscordAdapter, DiscordConfig};
+use crate::platforms::email::{EmailAdapter, EmailConfig, EmailMessageEvent};
 use crate::platforms::feishu::{FeishuAdapter, FeishuConfig, FeishuConnectionMode, FeishuMessageEvent};
 use crate::platforms::slack::{SlackAdapter, SlackConfig, SlackMessageEvent};
 use crate::platforms::telegram::{TelegramAdapter, TelegramConfig, TelegramMessageEvent};
 use crate::platforms::webhook::{WebhookAdapter, WebhookConfig};
 use crate::platforms::wecom::{WeComAdapter, WeComConfig};
 use crate::platforms::weixin::{WeixinAdapter, WeixinConfig, WeixinMessageEvent};
+use crate::platforms::qqbot::{QqbotAdapter, QqbotConfig, QqbotMessageEvent};
 use crate::platforms::whatsapp::{WhatsAppAdapter, WhatsAppConfig, WhatsAppMessageEvent};
 
 /// Gateway configuration.
@@ -100,6 +103,8 @@ struct HealthCheckStatus {
     wecom: bool,
     whatsapp: bool,
     webhook: bool,
+    qqbot: bool,
+    email: bool,
 }
 
 /// Health check HTTP handler.
@@ -117,6 +122,8 @@ async fn health_handler(
     platforms.insert("wecom".into(), serde_json::json!(status.wecom));
     platforms.insert("whatsapp".into(), serde_json::json!(status.whatsapp));
     platforms.insert("webhook".into(), serde_json::json!(status.webhook));
+    platforms.insert("qqbot".into(), serde_json::json!(status.qqbot));
+    platforms.insert("email".into(), serde_json::json!(status.email));
 
     let body = serde_json::json!({
         "status": if status.running.load(Ordering::SeqCst) { "ok" } else { "stopped" },
@@ -138,6 +145,8 @@ pub struct GatewayRunner {
     wecom_adapter: Option<Arc<WeComAdapter>>,
     whatsapp_adapter: Option<Arc<WhatsAppAdapter>>,
     webhook_adapter: Option<Arc<WebhookAdapter>>,
+    qqbot_adapter: Option<Arc<QqbotAdapter>>,
+    email_adapter: Option<Arc<EmailAdapter>>,
     api_server_shutdown_tx: Vec<oneshot::Sender<()>>,
     dingtalk_shutdown_tx: Vec<oneshot::Sender<()>>,
     feishu_shutdown_tx: Vec<oneshot::Sender<()>>,
@@ -146,6 +155,7 @@ pub struct GatewayRunner {
     slack_shutdown_tx: Vec<oneshot::Sender<()>>,
     whatsapp_shutdown_tx: Vec<oneshot::Sender<()>>,
     webhook_shutdown_tx: Vec<oneshot::Sender<()>>,
+    email_shutdown_tx: Vec<oneshot::Sender<()>>,
     /// Health check server shutdown sender.
     health_check_shutdown_tx: Option<oneshot::Sender<()>>,
     message_handler: Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
@@ -176,6 +186,8 @@ impl GatewayRunner {
             wecom_adapter: None,
             whatsapp_adapter: None,
             webhook_adapter: None,
+            qqbot_adapter: None,
+            email_adapter: None,
             api_server_shutdown_tx: Vec::new(),
             dingtalk_shutdown_tx: Vec::new(),
             feishu_shutdown_tx: Vec::new(),
@@ -184,6 +196,7 @@ impl GatewayRunner {
             slack_shutdown_tx: Vec::new(),
             whatsapp_shutdown_tx: Vec::new(),
             webhook_shutdown_tx: Vec::new(),
+            email_shutdown_tx: Vec::new(),
             health_check_shutdown_tx: None,
             message_handler: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -302,6 +315,24 @@ impl GatewayRunner {
                     info!("Initializing Webhook adapter...");
                     self.webhook_adapter = Some(Arc::new(WebhookAdapter::new(webhook_config)));
                 }
+                Platform::Qqbot => {
+                    let qqbot_config = QqbotConfig::from_env();
+                    if !qqbot_config.app_id.is_empty() && !qqbot_config.client_secret.is_empty() {
+                        info!("Initializing QQ Bot adapter...");
+                        self.qqbot_adapter = Some(Arc::new(QqbotAdapter::new(qqbot_config)));
+                    } else {
+                        warn!("QQ Bot enabled but not configured (missing QQ_APP_ID/SECRET)");
+                    }
+                }
+                Platform::Email => {
+                    let email_config = EmailConfig::from_env();
+                    if email_config.is_configured() {
+                        info!("Initializing Email adapter...");
+                        self.email_adapter = Some(Arc::new(EmailAdapter::new(email_config)));
+                    } else {
+                        warn!("Email enabled but not configured (missing EMAIL_ADDRESS/PASSWORD/IMAP/SMTP)");
+                    }
+                }
                 _ => {
                     warn!("Platform {} not yet implemented in Rust", entry.platform.as_str());
                 }
@@ -318,12 +349,14 @@ impl GatewayRunner {
         let wecom_count = self.wecom_adapter.is_some() as usize;
         let whatsapp_count = self.whatsapp_adapter.is_some() as usize;
         let webhook_count = self.webhook_adapter.is_some() as usize;
+        let qqbot_count = self.qqbot_adapter.is_some() as usize;
+        let email_count = self.email_adapter.is_some() as usize;
         let feishu_webhook_count = self.feishu_adapter.as_ref()
             .map(|a| matches!(a.config.connection_mode, FeishuConnectionMode::Webhook))
             .unwrap_or(false) as usize;
         info!(
             "Gateway initialized: {} platform(s) ready",
-            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count
+            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count
         );
         if feishu_webhook_count > 0 {
             info!("Feishu webhook: port={} path={}",
@@ -356,7 +389,7 @@ impl GatewayRunner {
             handles.push(handle);
         }
 
-        // Telegram: start polling loop
+        // Telegram: start polling loop or webhook server
         if let Some(adapter) = &self.telegram_adapter {
             let adapter = adapter.clone();
             let handler = self.message_handler.clone();
@@ -366,10 +399,53 @@ impl GatewayRunner {
             let session_store = self.session_store.clone();
             let default_model = self.config.default_model.clone();
             let per_chat_model = self.per_chat_model.clone();
-            let handle = tokio::spawn(async move {
-                run_telegram_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
-            });
-            handles.push(handle);
+            let is_webhook = adapter.config.webhook_url.is_some();
+
+            if is_webhook {
+                let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+                let adapter_for_webhook = adapter.clone();
+                let handle = tokio::spawn(async move {
+                    let on_msg = move |event: TelegramMessageEvent| {
+                        let handler = handler.clone();
+                        let running = running.clone();
+                        let running_sessions = running_sessions.clone();
+                        let busy_ack_ts = busy_ack_ts.clone();
+                        let session_store = session_store.clone();
+                        let default_model = default_model.clone();
+                        let per_chat_model = per_chat_model.clone();
+                        let adapter = adapter.clone();
+                        tokio::spawn(async move {
+                            if !running.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let handler_guard = handler.lock().await;
+                            let handler_ref = handler_guard.as_ref().cloned();
+                            drop(handler_guard);
+                            route_telegram_message(
+                                &adapter,
+                                handler_ref.as_ref(),
+                                &event,
+                                &running_sessions,
+                                &busy_ack_ts,
+                                &session_store,
+                                &default_model,
+                                &per_chat_model,
+                            )
+                            .await;
+                        });
+                    };
+                    if let Err(e) = adapter_for_webhook.run_webhook(on_msg, shutdown_rx).await {
+                        error!("Telegram webhook error: {e}");
+                    }
+                });
+                self.telegram_shutdown_tx.push(shutdown_tx);
+                handles.push(handle);
+            } else {
+                let handle = tokio::spawn(async move {
+                    run_telegram_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
+                });
+                handles.push(handle);
+            }
         }
 
         // Discord: start Gateway WebSocket loop
@@ -804,6 +880,45 @@ impl GatewayRunner {
             }
         }
 
+        // QQ Bot: start WebSocket event stream
+        if let Some(adapter) = &self.qqbot_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let running_sessions = self.running_sessions.clone();
+            let busy_ack_ts = self.busy_ack_ts.clone();
+            let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
+            let handle = tokio::spawn(async move {
+                run_qqbot(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
+            });
+            handles.push(handle);
+        }
+
+        // Email: connect and start polling loop
+        if let Some(adapter) = &self.email_adapter {
+            let adapter = adapter.clone();
+            if let Err(e) = adapter.connect().await {
+                error!("Email connect failed: {e}");
+            } else {
+                let adapter = adapter.clone();
+                let handler = self.message_handler.clone();
+                let running = self.running.clone();
+                let running_sessions = self.running_sessions.clone();
+                let busy_ack_ts = self.busy_ack_ts.clone();
+                let session_store = self.session_store.clone();
+                let default_model = self.config.default_model.clone();
+                let per_chat_model = self.per_chat_model.clone();
+                let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+                let handle = tokio::spawn(async move {
+                    run_email_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
+                });
+                self.email_shutdown_tx.push(shutdown_tx);
+                handles.push(handle);
+            }
+        }
+
         // Health check endpoint
         let health_port = std::env::var("HERMES_GATEWAY_HEALTH_PORT")
             .ok()
@@ -821,6 +936,8 @@ impl GatewayRunner {
             wecom: self.wecom_adapter.is_some(),
             whatsapp: self.whatsapp_adapter.is_some(),
             webhook: self.webhook_adapter.is_some(),
+            qqbot: self.qqbot_adapter.is_some(),
+            email: self.email_adapter.is_some(),
         };
         let (health_shutdown_tx, health_shutdown_rx) = oneshot::channel::<()>();
         let health_handle = tokio::spawn(async move {
@@ -905,6 +1022,15 @@ impl GatewayRunner {
         for tx in senders {
             let _ = tx.send(());
         }
+        // Trigger Email graceful shutdown
+        let senders = std::mem::take(&mut self.email_shutdown_tx);
+        for tx in senders {
+            let _ = tx.send(());
+        }
+        // Disconnect Email adapter
+        if let Some(adapter) = self.email_adapter.take() {
+            adapter.disconnect();
+        }
         // Trigger health check server graceful shutdown
         if let Some(tx) = self.health_check_shutdown_tx.take() {
             let _ = tx.send(());
@@ -935,6 +1061,8 @@ impl GatewayRunner {
             wecom_configured: self.wecom_adapter.is_some(),
             whatsapp_configured: self.whatsapp_adapter.is_some(),
             webhook_configured: self.webhook_adapter.is_some(),
+            qqbot_configured: self.qqbot_adapter.is_some(),
+            email_configured: self.email_adapter.is_some(),
             platform_count: self.config.platforms.iter().filter(|p| p.enabled).count(),
         }
     }
@@ -954,6 +1082,8 @@ pub struct GatewayStatus {
     pub wecom_configured: bool,
     pub whatsapp_configured: bool,
     pub webhook_configured: bool,
+    pub qqbot_configured: bool,
+    pub email_configured: bool,
     pub platform_count: usize,
 }
 
@@ -1632,6 +1762,7 @@ pub fn load_gateway_config() -> GatewayConfig {
                                     "api_server" => Platform::ApiServer,
                                     "whatsapp" => Platform::Whatsapp,
                                     "webhook" => Platform::Webhook,
+                                    "email" => Platform::Email,
                                     _ => Platform::Local,
                                 };
                                 let cfg = PlatformConfig::default();
@@ -1716,6 +1847,13 @@ pub fn load_gateway_config() -> GatewayConfig {
         if std::env::var("WEBHOOK_PORT").is_ok() || std::env::var("WEBHOOK_SECRET").is_ok() {
             platforms.push(PlatformConfigEntry {
                 platform: Platform::Webhook,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("EMAIL_ADDRESS").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Email,
                 enabled: true,
                 config: PlatformConfig::default(),
             });
@@ -1935,6 +2073,431 @@ async fn route_whatsapp_message(
     }
 }
 
+/// Poll Email INBOX for new messages and route to the agent.
+async fn run_email_poll(
+    adapter: Arc<EmailAdapter>,
+    handler: Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
+    running: Arc<AtomicBool>,
+    running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    session_store: Arc<SessionStore>,
+    default_model: String,
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
+) {
+    let mut poll_interval = interval(Duration::from_secs(adapter.poll_interval_secs()));
+    let mut consecutive_errors = 0u32;
+
+    info!("Email poll loop started");
+
+    while running.load(Ordering::SeqCst) {
+        poll_interval.tick().await;
+
+        match adapter.get_updates().await {
+            Ok(events) => {
+                consecutive_errors = 0;
+                for event in events {
+                    let handler_guard = handler.lock().await;
+                    let handler_ref = handler_guard.as_ref().cloned();
+                    drop(handler_guard);
+
+                    route_email_message(
+                        &adapter,
+                        handler_ref.as_ref(),
+                        &event,
+                        &running_sessions,
+                        &busy_ack_ts,
+                        &session_store,
+                        &default_model,
+                        &per_chat_model,
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors > 5 {
+                    warn!("Email: {consecutive_errors} consecutive errors: {e}");
+                } else {
+                    error!("Email poll error: {e}");
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+
+    info!("Email poll loop stopped");
+}
+
+/// Route an Email message to the agent handler.
+async fn route_email_message(
+    adapter: &EmailAdapter,
+    handler: Option<&Arc<dyn MessageHandler>>,
+    event: &EmailMessageEvent,
+    running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    session_store: &Arc<SessionStore>,
+    default_model: &str,
+    per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let chat_id = &event.chat_id;
+    let content = &event.content;
+    if content.is_empty() && event.media_paths.is_empty() {
+        return;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    // Check if this session is already running (busy session handling)
+    let busy_elapsed_min: Option<f64> = {
+        let sessions = running_sessions.lock();
+        sessions.get(chat_id).map(|&start_ts| {
+            let elapsed_secs = now - start_ts;
+            elapsed_secs / 60.0
+        })
+    };
+
+    if let Some(elapsed_min) = busy_elapsed_min {
+        // Allow /stop even when the session is busy
+        if GatewayCommand::parse(content)
+            .map(|c| c.name == "/stop")
+            .unwrap_or(false)
+        {
+            let ctx = command_ctx(
+                Platform::Email, chat_id, "dm",
+                Some(chat_id.clone()), None,
+                session_store, running_sessions, busy_ack_ts,
+                default_model, per_chat_model, handler,
+            );
+            if let Some(reply) = try_handle_command(&ctx, content).await {
+                let _ = adapter.send_text(chat_id, &reply).await;
+            }
+            return;
+        }
+
+        let should_ack = {
+            let mut ack_map = busy_ack_ts.lock();
+            let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
+            if now - last_ack < 30.0 {
+                false
+            } else {
+                ack_map.insert(chat_id.to_string(), now);
+                true
+            }
+        };
+
+        if should_ack {
+            if let Some(h) = handler {
+                h.interrupt(chat_id, content);
+            }
+            info!(
+                "Session {chat_id}: busy — agent interrupted after {elapsed_min:.1} min"
+            );
+
+            let busy_msg = format!(
+                "Still processing your previous message ({elapsed_min:.0}m elapsed). \
+                 Please wait for my response before sending another prompt."
+            );
+            let _ = adapter.send_text(chat_id, &busy_msg).await;
+        }
+        return;
+    }
+
+    info!(
+        "Email message from {}: {}",
+        chat_id,
+        content.chars().take(50).collect::<String>(),
+    );
+
+    // Command detection before agent invocation
+    let ctx = command_ctx(
+        Platform::Email, chat_id, "dm",
+        Some(chat_id.clone()), None,
+        session_store, running_sessions, busy_ack_ts,
+        default_model, per_chat_model, handler,
+    );
+    if let Some(reply) = try_handle_command(&ctx, content).await {
+        let _ = adapter.send_text(chat_id, &reply).await;
+        return;
+    }
+
+    {
+        let mut sessions = running_sessions.lock();
+        sessions.insert(chat_id.clone(), now);
+    }
+
+    let Some(handler_ref) = handler else {
+        running_sessions.lock().remove(chat_id);
+        warn!("No message handler registered for Email messages");
+        return;
+    };
+
+    match handler_ref
+        .handle_message(Platform::Email, chat_id, content)
+        .await
+    {
+        Ok(result) => {
+            running_sessions.lock().remove(chat_id);
+            busy_ack_ts.lock().remove(chat_id);
+
+            if result.compression_exhausted {
+                let source = SessionSource {
+                    platform: Platform::Email,
+                    chat_id: chat_id.to_string(),
+                    chat_name: Some(event.sender_name.clone()),
+                    chat_type: "dm".to_string(),
+                    user_id: Some(chat_id.clone()),
+                    user_name: Some(event.sender_name.clone()),
+                    thread_id: event.in_reply_to.clone(),
+                    chat_topic: Some(event.subject.clone()),
+                    user_id_alt: None,
+                    chat_id_alt: None,
+                };
+                session_store.reset_session_for(&source);
+                warn!("Session {chat_id}: compression exhausted — auto-reset performed");
+                let reset_msg = "Session reset: conversation context grew too large. \
+                    Starting fresh — previous context has been cleared.";
+                let _ = adapter.send_text(chat_id, reset_msg).await;
+            }
+            if !result.response.is_empty() {
+                if let Err(e) = adapter.send_text(chat_id, &result.response).await {
+                    error!("Email send failed: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            running_sessions.lock().remove(chat_id);
+            busy_ack_ts.lock().remove(chat_id);
+
+            error!("Agent handler failed for Email message: {e}");
+            let _ = adapter
+                .send_text(chat_id, "Sorry, I encountered an error processing your message.")
+                .await;
+        }
+    }
+}
+
+/// Poll QQ Bot WebSocket event stream and route to the agent.
+async fn run_qqbot(
+    adapter: Arc<QqbotAdapter>,
+    handler: Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
+    running: Arc<AtomicBool>,
+    running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    session_store: Arc<SessionStore>,
+    default_model: String,
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
+) {
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+
+    let adapter_ws = adapter.clone();
+    let running_ws = running.clone();
+    tokio::spawn(async move {
+        if let Err(e) = adapter_ws.connect_and_listen(running_ws, event_tx).await {
+            error!("QQ Bot listener error: {e}");
+        }
+    });
+
+    info!("QQ Bot event loop started");
+
+    while running.load(Ordering::SeqCst) {
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await {
+            Ok(Some(event)) => {
+                let handler_guard = handler.lock().await;
+                let handler_ref = handler_guard.as_ref().cloned();
+                drop(handler_guard);
+
+                route_qqbot_message(
+                    &adapter,
+                    handler_ref.as_ref(),
+                    &event,
+                    &running_sessions,
+                    &busy_ack_ts,
+                    &session_store,
+                    &default_model,
+                    &per_chat_model,
+                )
+                .await;
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    info!("QQ Bot event loop stopped");
+}
+
+/// Route a QQ Bot message to the agent handler.
+async fn route_qqbot_message(
+    adapter: &QqbotAdapter,
+    handler: Option<&Arc<dyn MessageHandler>>,
+    event: &QqbotMessageEvent,
+    running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    session_store: &Arc<SessionStore>,
+    default_model: &str,
+    per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if event.content.is_empty() && event.media_urls.is_empty() {
+        return;
+    }
+
+    let chat_id = &event.chat_id;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    // Check if this session is already running (busy session handling)
+    let busy_elapsed_min: Option<f64> = {
+        let sessions = running_sessions.lock();
+        sessions.get(chat_id).map(|&start_ts| {
+            let elapsed_secs = now - start_ts;
+            elapsed_secs / 60.0
+        })
+    };
+
+    if let Some(elapsed_min) = busy_elapsed_min {
+        // Allow /stop even when the session is busy
+        if GatewayCommand::parse(&event.content)
+            .map(|c| c.name == "/stop")
+            .unwrap_or(false)
+        {
+            let ctx = command_ctx(
+                Platform::Qqbot,
+                chat_id,
+                &event.chat_type,
+                Some(event.user_id.clone()),
+                None,
+                session_store,
+                running_sessions,
+                busy_ack_ts,
+                default_model,
+                per_chat_model,
+                handler,
+            );
+            if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+                let _ = adapter.send_text(chat_id, &reply).await;
+            }
+            return;
+        }
+
+        let should_ack = {
+            let mut ack_map = busy_ack_ts.lock();
+            let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
+            if now - last_ack < 30.0 {
+                false
+            } else {
+                ack_map.insert(chat_id.to_string(), now);
+                true
+            }
+        };
+
+        if should_ack {
+            if let Some(h) = handler {
+                h.interrupt(chat_id, &event.content);
+            }
+            info!(
+                "Session {chat_id}: busy — agent interrupted after {elapsed_min:.1} min"
+            );
+
+            let busy_msg = format!(
+                "Still processing your previous message ({elapsed_min:.0}m elapsed). \
+                 Please wait for my response before sending another prompt."
+            );
+            let _ = adapter.send_text(chat_id, &busy_msg).await;
+        }
+        return;
+    }
+
+    info!(
+        "QQ Bot message from {} via {}: {}",
+        event.user_id,
+        chat_id,
+        event.content.chars().take(50).collect::<String>(),
+    );
+
+    // Command detection before agent invocation
+    let ctx = command_ctx(
+        Platform::Qqbot,
+        chat_id,
+        &event.chat_type,
+        Some(event.user_id.clone()),
+        None,
+        session_store,
+        running_sessions,
+        busy_ack_ts,
+        default_model,
+        per_chat_model,
+        handler,
+    );
+    if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+        let _ = adapter.send_text(chat_id, &reply).await;
+        return;
+    }
+
+    {
+        let mut sessions = running_sessions.lock();
+        sessions.insert(chat_id.clone(), now);
+    }
+
+    let Some(handler_ref) = handler else {
+        running_sessions.lock().remove(chat_id);
+        warn!("No message handler registered for QQ Bot messages");
+        return;
+    };
+
+    match handler_ref
+        .handle_message(Platform::Qqbot, chat_id, &event.content)
+        .await
+    {
+        Ok(result) => {
+            running_sessions.lock().remove(chat_id);
+            busy_ack_ts.lock().remove(chat_id);
+
+            if result.compression_exhausted {
+                let source = SessionSource {
+                    platform: Platform::Qqbot,
+                    chat_id: chat_id.to_string(),
+                    chat_name: event.user_name.clone(),
+                    chat_type: event.chat_type.clone(),
+                    user_id: Some(event.user_id.clone()),
+                    user_name: event.user_name.clone(),
+                    thread_id: None,
+                    chat_topic: None,
+                    user_id_alt: None,
+                    chat_id_alt: None,
+                };
+                session_store.reset_session_for(&source);
+                warn!("Session {chat_id}: compression exhausted — auto-reset performed");
+                let reset_msg = "Session reset: conversation context grew too large. \
+                    Starting fresh — previous context has been cleared.";
+                let _ = adapter.send_text(chat_id, reset_msg).await;
+            }
+            if !result.response.is_empty() {
+                if let Err(e) = adapter.send_text(chat_id, &result.response).await {
+                    error!("QQ Bot send failed: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            running_sessions.lock().remove(chat_id);
+            busy_ack_ts.lock().remove(chat_id);
+
+            error!("Agent handler failed for QQ Bot message: {e}");
+            let _ = adapter
+                .send_text(chat_id, "Sorry, I encountered an error processing your message.")
+                .await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1964,6 +2527,8 @@ mod tests {
         assert!(!status.dingtalk_configured);
         assert!(!status.wecom_configured);
         assert!(!status.whatsapp_configured);
+        assert!(!status.qqbot_configured);
+        assert!(!status.email_configured);
     }
 
     #[test]
@@ -2003,6 +2568,8 @@ mod tests {
             wecom: false,
             whatsapp: true,
             webhook: false,
+            qqbot: false,
+            email: false,
         };
         // Verify clone works since HealthCheckStatus derives Clone
         let cloned = status.clone();

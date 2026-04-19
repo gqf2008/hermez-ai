@@ -26,6 +26,12 @@ futures = "0.3"
 async-stream = "0.3"
 base64.workspace = true
 
+# Email adapter
+imap = { version = "2", features = ["native-tls"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "native-tls", "hostname", "builder"] }
+mailparse = "0.15"
+native-tls = "0.2"
+
 # API Server adapter
 axum = "0.7"
 tower = "0.5"
