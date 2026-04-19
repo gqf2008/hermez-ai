@@ -1,0 +1,35 @@
+package hermez:plugin@0.1.0;
+
+/// Host functions exposed to the plugin.
+interface host {
+    /// Log a message at the given level (trace, debug, info, warn, error).
+    log: func(level: string, message: string);
+
+    /// Get a config value by key (from ~/.hermes/config.yaml).
+    get-config: func(key: string) -> option<string>;
+
+    /// Invoke another Hermes tool by name with JSON args.
+    invoke-tool: func(name: string, args: string) -> result<string, string>;
+}
+
+/// Plugin lifecycle and tool handling.
+interface plugin {
+    /// Called once when the plugin is loaded.
+    register: func();
+
+    /// Called at the start of each agent session turn.
+    on-session-start: func(ctx: string);
+
+    /// Called at the end of each agent session turn.
+    on-session-end: func(ctx: string);
+
+    /// Called when a WASM-registered tool is invoked.
+    /// Returns JSON result or error message.
+    handle-tool: func(name: string, args: string) -> result<string, string>;
+}
+
+/// The world that a Hermes plugin must target.
+world hermez-plugin {
+    import host;
+    export plugin;
+}

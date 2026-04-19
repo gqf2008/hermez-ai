@@ -25,6 +25,8 @@ chrono.workspace = true
 walkdir.workspace = true
 serde_yaml.workspace = true
 shellexpand.workspace = true
+wasmtime = { version = "25", default-features = false, features = ["cranelift", "runtime", "component-model"] }
+wasmtime-wasi = "25"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,10 @@
+name: example-component-plugin
+version: 0.1.0
+description: Example Component Model plugin for Hermes (Wassette-aligned)
+author: Hermes Team
+component_entry: plugin.component.wasm
+provides_hooks:
+  - on_session_start
+provides_tools:
+  - greet
+manifest_version: 1

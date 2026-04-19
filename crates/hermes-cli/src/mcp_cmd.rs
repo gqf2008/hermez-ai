@@ -112,6 +112,16 @@ pub fn cmd_mcp_list() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Known MCP presets.
+fn apply_preset(preset: &str) -> Option<(String, Vec<String>)> {
+    match preset {
+        "wassette" => Some(("wassette".to_string(), vec![])),
+        "playwright" => Some(("npx".to_string(), vec!["-y".to_string(), "@anthropic-ai/playwright-mcp".to_string()])),
+        "git" => Some(("uvx".to_string(), vec!["mcp-server-git".to_string(), "--repository".to_string(), ".".to_string()])),
+        _ => None,
+    }
+}
+
 /// Add an MCP server.
 pub fn cmd_mcp_add(
     name: &str,
@@ -130,20 +140,32 @@ pub fn cmd_mcp_add(
         return Ok(());
     }
 
+    // Apply preset if specified
+    let (final_command, final_args, final_preset) = if let Some(p) = preset {
+        if let Some((cmd, preset_args)) = apply_preset(p) {
+            (Some(cmd), preset_args, Some(p.to_string()))
+        } else {
+            println!("  {} Unknown preset: {}. Known presets: wassette, playwright, git", yellow().apply_to("⚠"), p);
+            return Ok(());
+        }
+    } else {
+        (command.map(String::from), args.to_vec(), preset.map(String::from))
+    };
+
     // Require either url or command
-    if url.is_none() && command.is_none() {
-        println!("  {} Specify either --url or --command.", yellow().apply_to("⚠"));
+    if url.is_none() && final_command.is_none() {
+        println!("  {} Specify either --url, --command, or --preset.", yellow().apply_to("⚠"));
         return Ok(());
     }
 
     servers.push(MCPServer {
         name: name.to_string(),
         url: url.map(String::from),
-        command: command.map(String::from),
-        args: args.to_vec(),
+        command: final_command,
+        args: final_args,
         enabled: true,
         auth: auth.map(String::from),
-        preset: preset.map(String::from),
+        preset: final_preset,
         env: env.to_vec(),
     });
 
@@ -152,13 +174,13 @@ pub fn cmd_mcp_add(
     if let Some(u) = url {
         println!("    URL: {u}");
     }
-    if let Some(c) = command {
-        println!("    Command: {c} {}", args.join(" "));
+    if let Some(ref c) = servers.last().unwrap().command {
+        println!("    Command: {c} {}", servers.last().unwrap().args.join(" "));
     }
     if let Some(a) = auth {
         println!("    Auth: {a}");
     }
-    if let Some(p) = preset {
+    if let Some(ref p) = servers.last().unwrap().preset {
         println!("    Preset: {p}");
     }
     if !env.is_empty() {
