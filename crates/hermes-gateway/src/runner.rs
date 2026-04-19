@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{Platform, PlatformConfig};
 use crate::platforms::api_server::{ApiServerAdapter, ApiServerConfig, ApiServerState};
-use crate::session::SessionStore;
+use crate::session::{SessionSource, SessionStore, build_session_key};
 use crate::platforms::dingtalk::{DingtalkAdapter, DingtalkConfig};
 use crate::platforms::discord::{DiscordAdapter, DiscordConfig};
 use crate::platforms::feishu::{FeishuAdapter, FeishuConfig, FeishuConnectionMode, FeishuMessageEvent};
@@ -158,6 +158,8 @@ pub struct GatewayRunner {
     busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     /// Session store for persistence and auto-reset.
     session_store: Arc<SessionStore>,
+    /// Per-chat model overrides (set via /model command).
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 }
 
 impl GatewayRunner {
@@ -191,6 +193,7 @@ impl GatewayRunner {
                 hermes_core::get_hermes_home().join("gateway_sessions"),
                 crate::config::GatewayConfig::default(),
             )),
+            per_chat_model: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -345,8 +348,10 @@ impl GatewayRunner {
             let running_sessions = self.running_sessions.clone();
             let busy_ack_ts = self.busy_ack_ts.clone();
             let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
             let handle = tokio::spawn(async move {
-                run_weixin_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store).await;
+                run_weixin_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
             });
             handles.push(handle);
         }
@@ -359,8 +364,10 @@ impl GatewayRunner {
             let running_sessions = self.running_sessions.clone();
             let busy_ack_ts = self.busy_ack_ts.clone();
             let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
             let handle = tokio::spawn(async move {
-                run_telegram_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store).await;
+                run_telegram_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
             });
             handles.push(handle);
         }
@@ -386,6 +393,8 @@ impl GatewayRunner {
             let running_sessions = self.running_sessions.clone();
             let busy_ack_ts = self.busy_ack_ts.clone();
             let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
             let adapter_for_run = adapter.clone();
             let handle = tokio::spawn(async move {
@@ -396,6 +405,8 @@ impl GatewayRunner {
                     let running_sessions = running_sessions.clone();
                     let busy_ack_ts = busy_ack_ts.clone();
                     let session_store = session_store.clone();
+                    let default_model = default_model.clone();
+                    let per_chat_model = per_chat_model.clone();
                     tokio::spawn(async move {
                         if !running.load(Ordering::SeqCst) {
                             return;
@@ -422,6 +433,23 @@ impl GatewayRunner {
                             };
 
                             if is_busy {
+                                // Allow /stop even when the session is busy
+                                if GatewayCommand::parse(content)
+                                    .map(|c| c.name == "/stop")
+                                    .unwrap_or(false)
+                                {
+                                    let ctx = command_ctx(
+                                        Platform::Slack, chat_id, "channel",
+                                        Some(event.user_id.clone()), event.thread_ts.clone(),
+                                        &session_store, &running_sessions, &busy_ack_ts,
+                                        &default_model, &per_chat_model, Some(h),
+                                    );
+                                    if let Some(reply) = try_handle_command(&ctx, content).await {
+                                        let _ = adapter.send_text(chat_id, &reply).await;
+                                    }
+                                    return;
+                                }
+
                                 let should_ack = {
                                     let mut ack_map = busy_ack_ts.lock();
                                     let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
@@ -440,6 +468,18 @@ impl GatewayRunner {
                                 return;
                             }
 
+                            // Command detection before agent invocation
+                            let ctx = command_ctx(
+                                Platform::Slack, chat_id, if event.is_dm { "dm" } else { "channel" },
+                                Some(event.user_id.clone()), event.thread_ts.clone(),
+                                &session_store, &running_sessions, &busy_ack_ts,
+                                &default_model, &per_chat_model, Some(h),
+                            );
+                            if let Some(reply) = try_handle_command(&ctx, content).await {
+                                let _ = adapter.send_text(chat_id, &reply).await;
+                                return;
+                            }
+
                             {
                                 let mut sessions = running_sessions.lock();
                                 sessions.insert(chat_id.clone(), now);
@@ -451,8 +491,19 @@ impl GatewayRunner {
                                     busy_ack_ts.lock().remove(chat_id);
 
                                     if result.compression_exhausted {
-                                        let session_key = format!("slack:{}", chat_id);
-                                        session_store.reset_session(&session_key);
+                                        let source = SessionSource {
+                                            platform: Platform::Slack,
+                                            chat_id: chat_id.to_string(),
+                                            chat_name: None,
+                                            chat_type: if event.is_dm { "dm".to_string() } else { "channel".to_string() },
+                                            user_id: Some(event.user_id.clone()),
+                                            user_name: None,
+                                            thread_id: event.thread_ts.clone(),
+                                            chat_topic: None,
+                                            user_id_alt: None,
+                                            chat_id_alt: None,
+                                        };
+                                        session_store.reset_session_for(&source);
                                         let _ = adapter.send_text(chat_id,
                                             "Session reset: conversation context grew too large. Starting fresh.").await;
                                     }
@@ -491,6 +542,11 @@ impl GatewayRunner {
             let adapter = adapter.clone();
             let handler = self.message_handler.clone();
             let running = self.running.clone();
+            let running_sessions = self.running_sessions.clone();
+            let busy_ack_ts = self.busy_ack_ts.clone();
+            let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
 
             match adapter.config.connection_mode {
                 FeishuConnectionMode::Webhook => {
@@ -503,40 +559,133 @@ impl GatewayRunner {
                                 let handler = handler.clone();
                                 let running = running.clone();
                                 let adapter = adapter_for_cb.clone();
+                                let running_sessions = running_sessions.clone();
+                                let busy_ack_ts = busy_ack_ts.clone();
+                                let session_store = session_store.clone();
+                                let default_model = default_model.clone();
+                                let per_chat_model = per_chat_model.clone();
                                 tokio::spawn(async move {
                                     if !running.load(Ordering::SeqCst) {
                                         return;
                                     }
                                     let guard = handler.lock().await;
                                     if let Some(h) = guard.as_ref() {
+                                        let chat_id = &event.chat_id;
+                                        let content = &event.content;
                                         info!(
                                             "Feishu message from {} via {}: {}",
                                             event.sender_id,
-                                            event.chat_id,
-                                            event.content.chars().take(50).collect::<String>(),
+                                            chat_id,
+                                            content.chars().take(50).collect::<String>(),
                                         );
+
+                                        // Check busy session
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs_f64();
+                                        let is_busy = {
+                                            let sessions = running_sessions.lock();
+                                            sessions.contains_key(chat_id)
+                                        };
+
+                                        if is_busy {
+                                            // Allow /stop even when the session is busy
+                                            if GatewayCommand::parse(content)
+                                                .map(|c| c.name == "/stop")
+                                                .unwrap_or(false)
+                                            {
+                                                let ctx = command_ctx(
+                                                    Platform::Feishu, chat_id, if event.is_group { "group" } else { "dm" },
+                                                    Some(event.sender_id.clone()), None,
+                                                    &session_store, &running_sessions, &busy_ack_ts,
+                                                    &default_model, &per_chat_model, Some(h),
+                                                );
+                                                if let Some(reply) = try_handle_command(&ctx, content).await {
+                                                    let _ = adapter.send_text(chat_id, &reply).await;
+                                                }
+                                                return;
+                                            }
+
+                                            let should_ack = {
+                                                let mut ack_map = busy_ack_ts.lock();
+                                                let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
+                                                if now - last_ack < 30.0 {
+                                                    false
+                                                } else {
+                                                    ack_map.insert(chat_id.to_string(), now);
+                                                    true
+                                                }
+                                            };
+                                            if should_ack {
+                                                h.interrupt(chat_id, content);
+                                                let _ = adapter.send_text(chat_id,
+                                                    "Still processing your previous message. Please wait.").await;
+                                            }
+                                            return;
+                                        }
+
+                                        // Command detection before agent invocation
+                                        let ctx = command_ctx(
+                                            Platform::Feishu, chat_id, if event.is_group { "group" } else { "dm" },
+                                            Some(event.sender_id.clone()), None,
+                                            &session_store, &running_sessions, &busy_ack_ts,
+                                            &default_model, &per_chat_model, Some(h),
+                                        );
+                                        if let Some(reply) = try_handle_command(&ctx, content).await {
+                                            let _ = adapter.send_text_or_post(chat_id, &reply).await;
+                                            return;
+                                        }
+
+                                        {
+                                            let mut sessions = running_sessions.lock();
+                                            sessions.insert(chat_id.clone(), now);
+                                        }
+
                                         match h
                                             .handle_message(
                                                 Platform::Feishu,
-                                                &event.chat_id,
-                                                &event.content,
+                                                chat_id,
+                                                content,
                                             )
                                             .await
                                         {
                                             Ok(result) => {
+                                                running_sessions.lock().remove(chat_id);
+                                                busy_ack_ts.lock().remove(chat_id);
+
+                                                if result.compression_exhausted {
+                                                    let source = SessionSource {
+                                                        platform: Platform::Feishu,
+                                                        chat_id: chat_id.to_string(),
+                                                        chat_name: None,
+                                                        chat_type: if event.is_group { "group".to_string() } else { "dm".to_string() },
+                                                        user_id: Some(event.sender_id.clone()),
+                                                        user_name: None,
+                                                        thread_id: None,
+                                                        chat_topic: None,
+                                                        user_id_alt: None,
+                                                        chat_id_alt: None,
+                                                    };
+                                                    session_store.reset_session_for(&source);
+                                                    let _ = adapter.send_text(chat_id,
+                                                        "Session reset: conversation context grew too large. Starting fresh.").await;
+                                                }
                                                 if !result.response.is_empty() {
                                                     if let Err(e) =
-                                                        adapter.send_text_or_post(&event.chat_id, &result.response).await
+                                                        adapter.send_text_or_post(chat_id, &result.response).await
                                                     {
                                                         error!("Feishu send failed: {e}");
                                                     }
                                                 }
                                             }
                                             Err(e) => {
+                                                running_sessions.lock().remove(chat_id);
+                                                busy_ack_ts.lock().remove(chat_id);
                                                 error!("Agent handler failed for Feishu message: {e}");
                                                 let _ = adapter
                                                     .send_text(
-                                                        &event.chat_id,
+                                                        chat_id,
                                                         "Sorry, I encountered an error processing your message.",
                                                     )
                                                     .await;
@@ -622,9 +771,11 @@ impl GatewayRunner {
                 let running_sessions = self.running_sessions.clone();
                 let busy_ack_ts = self.busy_ack_ts.clone();
                 let session_store = self.session_store.clone();
+                let default_model = self.config.default_model.clone();
+                let per_chat_model = self.per_chat_model.clone();
                 let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
                 let handle = tokio::spawn(async move {
-                    run_whatsapp_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store).await;
+                    run_whatsapp_poll(adapter, handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
                 });
                 self.whatsapp_shutdown_tx.push(shutdown_tx);
                 handles.push(handle);
@@ -806,6 +957,202 @@ pub struct GatewayStatus {
     pub platform_count: usize,
 }
 
+// ── Gateway Commands ───────────────────────────────────────────────────────
+
+/// Parsed gateway command from a user message.
+#[derive(Debug, Clone)]
+struct GatewayCommand {
+    name: String,
+    args: Vec<String>,
+    raw: String,
+}
+
+impl GatewayCommand {
+    /// Parse a message text into a command if it starts with '/'.
+    fn parse(text: &str) -> Option<Self> {
+        let trimmed = text.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let name = parts[0].to_lowercase();
+        let args = parts[1..].iter().map(|s| s.to_string()).collect();
+        Some(Self {
+            name,
+            args,
+            raw: trimmed.to_string(),
+        })
+    }
+}
+
+/// Context passed to command handlers.
+struct CommandContext<'a> {
+    session_source: SessionSource,
+    session_store: &'a SessionStore,
+    running_sessions: &'a Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: &'a Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    default_model: &'a str,
+    per_chat_model: &'a Arc<parking_lot::Mutex<HashMap<String, String>>>,
+    handler: Option<&'a Arc<dyn MessageHandler>>,
+}
+
+/// Build a `CommandContext` from raw platform fields.
+fn command_ctx<'a>(
+    platform: Platform,
+    chat_id: &'a str,
+    chat_type: &'a str,
+    user_id: Option<String>,
+    thread_id: Option<String>,
+    session_store: &'a SessionStore,
+    running_sessions: &'a Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: &'a Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    default_model: &'a str,
+    per_chat_model: &'a Arc<parking_lot::Mutex<HashMap<String, String>>>,
+    handler: Option<&'a Arc<dyn MessageHandler>>,
+) -> CommandContext<'a> {
+    CommandContext {
+        session_source: SessionSource {
+            platform,
+            chat_id: chat_id.to_string(),
+            chat_name: None,
+            chat_type: chat_type.to_string(),
+            user_id,
+            user_name: None,
+            thread_id,
+            chat_topic: None,
+            user_id_alt: None,
+            chat_id_alt: None,
+        },
+        session_store,
+        running_sessions,
+        busy_ack_ts,
+        default_model,
+        per_chat_model,
+        handler,
+    }
+}
+
+/// Try to handle a gateway command. Returns `Some(reply)` if the message was a
+/// command and has been handled (caller should send the reply and skip the
+/// normal agent handler). Returns `None` for normal messages.
+async fn try_handle_command(ctx: &CommandContext<'_>, content: &str) -> Option<String> {
+    let cmd = GatewayCommand::parse(content)?;
+
+    let chat_id = ctx.session_source.chat_id.clone();
+
+    match cmd.name.as_str() {
+        "/reset" | "/new" | "/restart" => {
+            ctx.session_store.reset_session_for(&ctx.session_source);
+            // Also clear any per-chat model override
+            ctx.per_chat_model.lock().remove(&chat_id);
+            Some("✅ Session reset. Starting fresh!".to_string())
+        }
+
+        "/stop" => {
+            let was_running = {
+                let mut sessions = ctx.running_sessions.lock();
+                sessions.remove(&chat_id).is_some()
+            };
+            if was_running {
+                // Also clear busy ack timestamp
+                ctx.busy_ack_ts.lock().remove(&chat_id);
+                // Signal interrupt to the running agent
+                if let Some(h) = ctx.handler {
+                    h.interrupt(&chat_id, "/stop");
+                }
+                Some("⏹️ Stopped the current conversation.".to_string())
+            } else {
+                Some("ℹ️ No active conversation to stop.".to_string())
+            }
+        }
+
+        "/status" => {
+            let session_key = build_session_key(
+                &ctx.session_source,
+                ctx.session_store.group_sessions_per_user(),
+                ctx.session_store.thread_sessions_per_user(),
+            );
+            let sessions = ctx.session_store.list_sessions(None);
+            let session_info = sessions.iter().find(|s| s.session_key == session_key);
+
+            let model_override = ctx.per_chat_model.lock().get(&chat_id).cloned();
+            let active_model = model_override.as_deref().unwrap_or(ctx.default_model);
+
+            let mut lines = vec![
+                "*Gateway Status*".to_string(),
+                String::new(),
+                format!("Platform: {}", ctx.session_source.platform.as_str()),
+                format!("Active model: {active_model}"),
+            ];
+
+            if let Some(entry) = session_info {
+                lines.push(format!("Session ID: {}", entry.session_id));
+                lines.push(format!(
+                    "Messages: {} tokens",
+                    entry.total_tokens
+                ));
+                lines.push(format!(
+                    "Last active: {}",
+                    entry.updated_at.format("%Y-%m-%d %H:%M:%S")
+                ));
+                if entry.was_auto_reset {
+                    lines.push(format!(
+                        "Auto-reset: {} ({})",
+                        entry.auto_reset_reason.as_deref().unwrap_or("unknown"),
+                        if entry.reset_had_activity { "had activity" } else { "no activity" }
+                    ));
+                }
+            } else {
+                lines.push("Session: new (no history yet)".to_string());
+            }
+
+            let running = {
+                let sessions = ctx.running_sessions.lock();
+                sessions.contains_key(&chat_id)
+            };
+            lines.push(format!("Agent state: {}", if running { "🟢 running" } else { "⚪ idle" }));
+
+            Some(lines.join("\n"))
+        }
+
+        "/model" => {
+            if cmd.args.is_empty() {
+                let current = ctx
+                    .per_chat_model
+                    .lock()
+                    .get(&chat_id)
+                    .cloned()
+                    .unwrap_or_else(|| ctx.default_model.to_string());
+                Some(format!("Current model: {current}\nUsage: /model <model-name>\n\
+                    ⚠️ Note: per-chat model override is not yet wired to the agent engine."))
+            } else {
+                let model = cmd.args[0].clone();
+                ctx.per_chat_model
+                    .lock()
+                    .insert(chat_id, model.clone());
+                Some(format!("✅ Model set to: {model}\n\
+                    ⚠️ Note: per-chat model override is not yet wired to the agent engine."))
+            }
+        }
+
+        "/help" | "/commands" => {
+            let help_text = "Available commands:\n\
+                • /reset or /new — Reset the current session\n\
+                • /stop — Stop the current conversation\n\
+                • /status — Show gateway and session status\n\
+                • /model [name] — Show or set the model for this chat\n\
+                • /help — Show this help message";
+            Some(help_text.to_string())
+        }
+
+        // Unknown command — treat as normal message so the agent can handle it
+        _ => None,
+    }
+}
+
 /// Poll Weixin for inbound messages and route to the agent.
 async fn run_weixin_poll(
     adapter: Arc<WeixinAdapter>,
@@ -814,6 +1161,8 @@ async fn run_weixin_poll(
     running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: Arc<SessionStore>,
+    default_model: String,
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     let mut poll_interval = interval(Duration::from_secs(2));
     let mut consecutive_errors = 0u32;
@@ -837,6 +1186,7 @@ async fn run_weixin_poll(
                     route_weixin_message(
                         &adapter, handler_ref.as_ref(), &event,
                         &running_sessions, &busy_ack_ts, &session_store,
+                        &default_model, &per_chat_model,
                     ).await;
                 }
             }
@@ -874,6 +1224,8 @@ async fn route_weixin_message(
     running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: &Arc<SessionStore>,
+    default_model: &str,
+    per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -908,6 +1260,23 @@ async fn route_weixin_message(
     };
 
     if let Some(elapsed_min) = busy_elapsed_min {
+        // Allow /stop even when the session is busy
+        if GatewayCommand::parse(&event.content)
+            .map(|c| c.name == "/stop")
+            .unwrap_or(false)
+        {
+            let ctx = command_ctx(
+                Platform::Weixin, chat_id, if event.is_group { "group" } else { "dm" },
+                None, None,
+                session_store, running_sessions, busy_ack_ts,
+                default_model, per_chat_model, handler,
+            );
+            if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+                let _ = adapter.send_text(chat_id, &reply).await;
+            }
+            return;
+        }
+
         // Session is busy — interrupt the running agent and ack
 
         // Busy ack debounce: only send every 30 seconds
@@ -948,6 +1317,18 @@ async fn route_weixin_message(
         event.content.chars().take(50).collect::<String>(),
     );
 
+    // Command detection before agent invocation
+    let ctx = command_ctx(
+        Platform::Weixin, chat_id, if event.is_group { "group" } else { "dm" },
+        None, None,
+        session_store, running_sessions, busy_ack_ts,
+        default_model, per_chat_model, handler,
+    );
+    if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+        let _ = adapter.send_text(chat_id, &reply).await;
+        return;
+    }
+
     // Mark session as running
     {
         let mut sessions = running_sessions.lock();
@@ -973,8 +1354,19 @@ async fn route_weixin_message(
             // Compression exhaustion — auto-reset session and notify user.
             // Mirrors Python gateway/run.py behavior.
             if result.compression_exhausted {
-                let session_key = format!("weixin:{}", chat_id);
-                session_store.reset_session(&session_key);
+                let source = SessionSource {
+                    platform: Platform::Weixin,
+                    chat_id: chat_id.to_string(),
+                    chat_name: None,
+                    chat_type: if event.is_group { "group".to_string() } else { "dm".to_string() },
+                    user_id: None,
+                    user_name: None,
+                    thread_id: None,
+                    chat_topic: None,
+                    user_id_alt: None,
+                    chat_id_alt: None,
+                };
+                session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
                 let reset_msg = "Session reset: conversation context grew too large. \
                     Starting fresh — previous context has been cleared.";
@@ -1007,6 +1399,8 @@ async fn run_telegram_poll(
     running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: Arc<SessionStore>,
+    default_model: String,
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     let mut poll_interval = interval(Duration::from_secs(1));
     let mut consecutive_errors = 0u32;
@@ -1031,6 +1425,8 @@ async fn run_telegram_poll(
                         &running_sessions,
                         &busy_ack_ts,
                         &session_store,
+                        &default_model,
+                        &per_chat_model,
                     )
                     .await;
                 }
@@ -1058,6 +1454,8 @@ async fn route_telegram_message(
     running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: &Arc<SessionStore>,
+    default_model: &str,
+    per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1081,6 +1479,23 @@ async fn route_telegram_message(
     };
 
     if let Some(elapsed_min) = busy_elapsed_min {
+        // Allow /stop even when the session is busy
+        if GatewayCommand::parse(&event.content)
+            .map(|c| c.name == "/stop")
+            .unwrap_or(false)
+        {
+            let ctx = command_ctx(
+                Platform::Telegram, chat_id, "dm",
+                event.sender_id.clone(), event.message_thread_id.map(|id| id.to_string()),
+                session_store, running_sessions, busy_ack_ts,
+                default_model, per_chat_model, handler,
+            );
+            if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+                let _ = adapter.send_text(chat_id, &reply).await;
+            }
+            return;
+        }
+
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
@@ -1115,6 +1530,18 @@ async fn route_telegram_message(
         event.content.chars().take(50).collect::<String>(),
     );
 
+    // Command detection before agent invocation
+    let ctx = command_ctx(
+        Platform::Telegram, chat_id, "dm",
+        event.sender_id.clone(), event.message_thread_id.map(|id| id.to_string()),
+        session_store, running_sessions, busy_ack_ts,
+        default_model, per_chat_model, handler,
+    );
+    if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+        let _ = adapter.send_text(chat_id, &reply).await;
+        return;
+    }
+
     {
         let mut sessions = running_sessions.lock();
         sessions.insert(chat_id.clone(), now);
@@ -1136,8 +1563,19 @@ async fn route_telegram_message(
 
             // Compression exhaustion — auto-reset session and notify user.
             if result.compression_exhausted {
-                let session_key = format!("telegram:{}", chat_id);
-                session_store.reset_session(&session_key);
+                let source = SessionSource {
+                    platform: Platform::Telegram,
+                    chat_id: chat_id.to_string(),
+                    chat_name: None,
+                    chat_type: "dm".to_string(),
+                    user_id: event.sender_id.clone(),
+                    user_name: None,
+                    thread_id: event.message_thread_id.map(|id| id.to_string()),
+                    chat_topic: None,
+                    user_id_alt: None,
+                    chat_id_alt: None,
+                };
+                session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
                 let reset_msg = "Session reset: conversation context grew too large. \
                     Starting fresh — previous context has been cleared.";
@@ -1298,6 +1736,8 @@ async fn run_whatsapp_poll(
     running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: Arc<SessionStore>,
+    default_model: String,
+    per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     let mut poll_interval = interval(Duration::from_secs(1));
     let mut consecutive_errors = 0u32;
@@ -1322,6 +1762,8 @@ async fn run_whatsapp_poll(
                         &running_sessions,
                         &busy_ack_ts,
                         &session_store,
+                        &default_model,
+                        &per_chat_model,
                     )
                     .await;
                 }
@@ -1349,6 +1791,8 @@ async fn route_whatsapp_message(
     running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     session_store: &Arc<SessionStore>,
+    default_model: &str,
+    per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
 ) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1365,13 +1809,30 @@ async fn route_whatsapp_message(
     // Check if this session is already running (busy session handling)
     let busy_elapsed_min: Option<f64> = {
         let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(&|start_ts| {
+        sessions.get(chat_id).map(|start_ts| {
             let elapsed_secs = now - start_ts;
             elapsed_secs / 60.0
         })
     };
 
     if let Some(elapsed_min) = busy_elapsed_min {
+        // Allow /stop even when the session is busy
+        if GatewayCommand::parse(&event.content)
+            .map(|c| c.name == "/stop")
+            .unwrap_or(false)
+        {
+            let ctx = command_ctx(
+                Platform::Whatsapp, chat_id, "dm",
+                None, None,
+                session_store, running_sessions, busy_ack_ts,
+                default_model, per_chat_model, handler,
+            );
+            if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+                let _ = adapter.send_text(chat_id, &reply).await;
+            }
+            return;
+        }
+
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
@@ -1406,6 +1867,18 @@ async fn route_whatsapp_message(
         event.content.chars().take(50).collect::<String>(),
     );
 
+    // Command detection before agent invocation
+    let ctx = command_ctx(
+        Platform::Whatsapp, chat_id, "dm",
+        None, None,
+        session_store, running_sessions, busy_ack_ts,
+        default_model, per_chat_model, handler,
+    );
+    if let Some(reply) = try_handle_command(&ctx, &event.content).await {
+        let _ = adapter.send_text(chat_id, &reply).await;
+        return;
+    }
+
     {
         let mut sessions = running_sessions.lock();
         sessions.insert(chat_id.clone(), now);
@@ -1426,8 +1899,19 @@ async fn route_whatsapp_message(
             busy_ack_ts.lock().remove(chat_id);
 
             if result.compression_exhausted {
-                let session_key = format!("whatsapp:{}", chat_id);
-                session_store.reset_session(&session_key);
+                let source = SessionSource {
+                    platform: Platform::Whatsapp,
+                    chat_id: chat_id.to_string(),
+                    chat_name: None,
+                    chat_type: "dm".to_string(),
+                    user_id: None,
+                    user_name: None,
+                    thread_id: None,
+                    chat_topic: None,
+                    user_id_alt: None,
+                    chat_id_alt: None,
+                };
+                session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
                 let reset_msg = "Session reset: conversation context grew too large. \
                     Starting fresh — previous context has been cleared.";
@@ -1532,5 +2016,46 @@ mod tests {
         // Verify that load_gateway_config falls back correctly when no config file exists
         let config = load_gateway_config();
         assert!(!config.default_model.is_empty());
+    }
+
+    // ── Command parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_command_simple() {
+        let cmd = GatewayCommand::parse("/reset").unwrap();
+        assert_eq!(cmd.name, "/reset");
+        assert!(cmd.args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_command_with_args() {
+        let cmd = GatewayCommand::parse("/model gpt-4o").unwrap();
+        assert_eq!(cmd.name, "/model");
+        assert_eq!(cmd.args, vec!["gpt-4o"]);
+    }
+
+    #[test]
+    fn test_parse_command_multiple_args() {
+        let cmd = GatewayCommand::parse("/model   anthropic/claude-sonnet   --fast").unwrap();
+        assert_eq!(cmd.name, "/model");
+        assert_eq!(cmd.args, vec!["anthropic/claude-sonnet", "--fast"]);
+    }
+
+    #[test]
+    fn test_parse_command_case_insensitive() {
+        let cmd = GatewayCommand::parse("/STATUS").unwrap();
+        assert_eq!(cmd.name, "/status");
+    }
+
+    #[test]
+    fn test_parse_not_command() {
+        assert!(GatewayCommand::parse("hello world").is_none());
+        assert!(GatewayCommand::parse("  hello  ").is_none());
+    }
+
+    #[test]
+    fn test_parse_command_with_leading_whitespace() {
+        let cmd = GatewayCommand::parse("  /help").unwrap();
+        assert_eq!(cmd.name, "/help");
     }
 }

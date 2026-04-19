@@ -597,7 +597,7 @@ impl SessionStore {
         count
     }
 
-    /// Force reset a session, creating a new session ID.
+    /// Force reset a session by its raw key, creating a new session ID.
     pub fn reset_session(&self, session_key: &str) -> Option<SessionEntry> {
         self.ensure_loaded();
         let mut entries = self.entries.lock();
@@ -632,6 +632,17 @@ impl SessionStore {
         self.save().ok();
 
         Some(new_entry)
+    }
+
+    /// Reset a session using a `SessionSource` so the key is computed correctly
+    /// (mirrors `get_or_create_session` key logic).
+    pub fn reset_session_for(&self, source: &SessionSource) -> Option<SessionEntry> {
+        let session_key = build_session_key(
+            source,
+            self.config.group_sessions_per_user,
+            self.config.thread_sessions_per_user,
+        );
+        self.reset_session(&session_key)
     }
 
     /// Switch a session key to point at an existing session ID.
@@ -819,6 +830,16 @@ impl SessionStore {
     pub fn session_count(&self) -> usize {
         self.ensure_loaded();
         self.entries.lock().len()
+    }
+
+    /// Return whether group sessions are isolated per user.
+    pub fn group_sessions_per_user(&self) -> bool {
+        self.config.group_sessions_per_user
+    }
+
+    /// Return whether thread sessions are isolated per user.
+    pub fn thread_sessions_per_user(&self) -> bool {
+        self.config.thread_sessions_per_user
     }
 }
 

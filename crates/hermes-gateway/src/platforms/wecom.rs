@@ -1719,8 +1719,8 @@ mod tests {
         assert!(!adapter.is_configured());
     }
 
-    #[test]
-    fn test_extract_text_content() {
+    #[tokio::test]
+    async fn test_extract_text_content() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_1",
@@ -1731,14 +1731,14 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
+        let evt = adapter.handle_inbound(&event).await.unwrap();
         assert_eq!(evt.content, "hello wecom");
         assert!(!evt.is_group);
         assert_eq!(evt.chat_id, "dm:user123");
     }
 
-    #[test]
-    fn test_extract_group_message() {
+    #[tokio::test]
+    async fn test_extract_group_message() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_2",
@@ -1750,13 +1750,13 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
+        let evt = adapter.handle_inbound(&event).await.unwrap();
         assert!(evt.is_group);
         assert_eq!(evt.chat_id, "group:group456");
     }
 
-    #[test]
-    fn test_extract_mixed_content() {
+    #[tokio::test]
+    async fn test_extract_mixed_content() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_3",
@@ -1771,12 +1771,12 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
+        let evt = adapter.handle_inbound(&event).await.unwrap();
         assert_eq!(evt.content, "text before\ntext after");
     }
 
-    #[test]
-    fn test_extract_voice_content() {
+    #[tokio::test]
+    async fn test_extract_voice_content() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_4",
@@ -1787,12 +1787,12 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
-        assert_eq!(evt.content, "[voice] 语音消息");
+        let evt = adapter.handle_inbound(&event).await.unwrap();
+        assert_eq!(evt.content, "语音消息");
     }
 
-    #[test]
-    fn test_extract_appmsg_title() {
+    #[tokio::test]
+    async fn test_extract_appmsg_title() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_5",
@@ -1803,12 +1803,12 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
-        assert_eq!(evt.content, "[appmsg] Article Title");
+        let evt = adapter.handle_inbound(&event).await.unwrap();
+        assert_eq!(evt.content, "Article Title");
     }
 
-    #[test]
-    fn test_dedup() {
+    #[tokio::test]
+    async fn test_dedup() {
         let adapter = WeComAdapter::new(WeComConfig::default());
         let event = serde_json::json!({
             "body": {
@@ -1818,12 +1818,12 @@ mod tests {
                 "text": {"content": "hello"},
             }
         });
-        assert!(adapter.handle_inbound(&event).is_some());
-        assert!(adapter.handle_inbound(&event).is_none());
+        assert!(adapter.handle_inbound(&event).await.is_some());
+        assert!(adapter.handle_inbound(&event).await.is_none());
     }
 
-    #[test]
-    fn test_req_id_extracted() {
+    #[tokio::test]
+    async fn test_req_id_extracted() {
         let event = serde_json::json!({
             "cmd": "aibot_msg_callback",
             "headers": {"req_id": "callback-test-123"},
@@ -1835,27 +1835,28 @@ mod tests {
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
+        let evt = adapter.handle_inbound(&event).await.unwrap();
         assert_eq!(evt.req_id, "callback-test-123");
     }
 
-    #[test]
-    fn test_extract_quote_message() {
+    #[tokio::test]
+    async fn test_extract_quote_message() {
         let event = serde_json::json!({
             "body": {
                 "msgid": "wecom_msg_7",
                 "chattype": "1",
                 "from": {"userid": "user1"},
                 "msgtype": "text",
+                "text": {"content": "hello"},
                 "quote": {
-                    "content": "this is a reply",
-                    "original": {"content": "original message"},
+                    "msgtype": "text",
+                    "text": {"content": "this is a reply"},
                 },
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
-        let evt = adapter.handle_inbound(&event).unwrap();
-        assert!(evt.content.contains("this is a reply"));
-        assert!(evt.content.contains("original message"));
+        let evt = adapter.handle_inbound(&event).await.unwrap();
+        assert_eq!(evt.reply_to_text, Some("this is a reply".to_string()));
+        assert_eq!(evt.content, "hello");
     }
 }

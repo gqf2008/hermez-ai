@@ -306,6 +306,8 @@ terminal:
 
 ## Porting Notes (Python → Rust)
 
+> **Key context:** This repository (`hermez-ai`) is the Rust rewrite of the original Python implementation located at **`../hermes-agent`** (relative to this workspace). When cross-referencing behavior or looking up original logic, refer to that sibling directory.
+
 This codebase is an active port from a Python implementation. Many module doc comments reference the original Python files:
 - `run_agent.py:AIAgent` → `hermes-agent-engine/src/agent.rs:AIAgent`
 - `config.py:load_config` → `hermes-core/src/config.rs:HermesConfig::load`
