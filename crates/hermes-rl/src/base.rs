@@ -237,6 +237,25 @@ impl AgentResult {
 }
 
 // ---------------------------------------------------------------------------
+// AgentRunner — bridge to real agent loop
+// ---------------------------------------------------------------------------
+
+/// Trait for plugging a real agent into an environment's evaluate loop.
+///
+/// Implementations (e.g. in `hermes-cli` or `src/main.rs`) wrap
+/// `AIAgent::run_conversation()` and convert the `TurnResult` into
+/// the `AgentResult` expected by the environment.
+#[async_trait::async_trait]
+pub trait AgentRunner: Send + Sync {
+    /// Run the agent loop for a single task.
+    ///
+    /// `messages` is the initial conversation history (system + user prompt).
+    /// The runner should return the full conversation after the agent loop
+    /// completes, along with metadata about the run.
+    async fn run(&self, messages: Vec<Message>) -> AgentResult;
+}
+
+// ---------------------------------------------------------------------------
 // ScoredTrajectory — output of a rollout with reward
 // ---------------------------------------------------------------------------
 

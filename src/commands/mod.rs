@@ -1096,12 +1096,15 @@ pub(crate) enum SweAction {
         /// Output directory for report
         #[arg(short = 'o', long)]
         output: Option<String>,
-        /// Model name (for report metadata)
+        /// Model name (for agent + report metadata)
         #[arg(long)]
         model: Option<String>,
         /// Quick mode: fewer samples, faster
         #[arg(long)]
         quick: bool,
+        /// Use a real AIAgent instead of placeholder evaluation
+        #[arg(long)]
+        agent: bool,
     },
     /// Run built-in benchmark suite
     Benchmark {

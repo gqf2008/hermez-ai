@@ -1,0 +1,10 @@
+name: example-wasm-plugin
+version: 0.1.0
+description: Example WASM plugin for Hermes (Phase 2)
+author: Hermes Team
+wasm_entry: plugin.wasm
+provides_hooks:
+  - on_session_start
+provides_tools:
+  - greet
+manifest_version: 1

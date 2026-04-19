@@ -337,7 +337,7 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
         }
         Some(Commands::Swe { action }) => {
             match action {
-                Some(SweAction::Evaluate { dataset, split, sandbox, max_samples, output, model, quick }) => {
+                Some(SweAction::Evaluate { dataset, split, sandbox, max_samples, output, model, quick, agent }) => {
                     let opts = hermes_cli::swe_cmd::SweEvaluateOptions {
                         dataset,
                         split,
@@ -346,6 +346,7 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
                         output_dir: output,
                         model,
                         quick,
+                        use_agent: agent,
                     };
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(hermes_cli::swe_cmd::cmd_swe_evaluate(&opts))?;
