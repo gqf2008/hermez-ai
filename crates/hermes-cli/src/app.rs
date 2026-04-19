@@ -877,7 +877,7 @@ impl HermesApp {
                 } else {
                     Ok(hermes_gateway::runner::HandlerResult {
                         response: turn_result.response.clone(),
-                        messages: turn_result.messages.clone(),
+                        messages: turn_result.messages.iter().map(|arc| (**arc).clone()).collect(),
                         compression_exhausted: turn_result.compression_exhausted,
                         usage: turn_result.usage.map(|u| hermes_gateway::runner::TokenUsage {
                             prompt_tokens: u.prompt_tokens,

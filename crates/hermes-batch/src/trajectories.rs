@@ -65,10 +65,11 @@ pub struct ReasoningStats {
 }
 
 /// Extract tool stats from conversation messages.
-pub fn extract_tool_stats(messages: &[serde_json::Value]) -> ToolStats {
+pub fn extract_tool_stats<T: std::borrow::Borrow<serde_json::Value>>(messages: &[T]) -> ToolStats {
     let mut stats = ToolStats::default();
 
     for msg in messages {
+        let msg = msg.borrow();
         // Check for tool calls in assistant messages
         if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
             for tc in tool_calls {
@@ -111,10 +112,11 @@ pub fn extract_tool_stats(messages: &[serde_json::Value]) -> ToolStats {
 }
 
 /// Extract reasoning stats from conversation messages.
-pub fn extract_reasoning_stats(messages: &[serde_json::Value]) -> ReasoningStats {
+pub fn extract_reasoning_stats<T: std::borrow::Borrow<serde_json::Value>>(messages: &[T]) -> ReasoningStats {
     let mut stats = ReasoningStats::default();
 
     for msg in messages {
+        let msg = msg.borrow();
         if let Some(role) = msg.get("role").and_then(|v| v.as_str()) {
             if role == "assistant" {
                 stats.total_turns += 1;
