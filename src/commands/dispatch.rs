@@ -597,8 +597,13 @@ pub fn dispatch_command(app: &HermesApp, command: Option<Commands>) -> anyhow::R
         Some(Commands::Uninstall { keep_data, keep_config, yes }) => {
             hermes_cli::uninstall_cmd::cmd_uninstall(keep_data, keep_config, yes)?;
         }
-        Some(Commands::Dashboard { port, host, no_open, insecure }) => {
-            hermes_cli::dashboard_cmd::cmd_dashboard_with_opts(&host, port, no_open, insecure)?;
+        Some(Commands::Dashboard { port, host, no_open, insecure, serve }) => {
+            if serve {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(hermes_cli::web_server::run_server(&host, port))?;
+            } else {
+                hermes_cli::dashboard_cmd::cmd_dashboard_with_opts(&host, port, no_open, insecure)?;
+            }
         }
         Some(Commands::WhatsApp { action, token, phone_id }) => {
             hermes_cli::whatsapp_cmd::cmd_whatsapp(&action, token.as_deref(), phone_id.as_deref())?;

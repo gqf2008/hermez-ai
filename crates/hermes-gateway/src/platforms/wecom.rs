@@ -1694,6 +1694,7 @@ impl WeComAdapter {
 
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1752,6 +1753,7 @@ mod tests {
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
         let evt = adapter.handle_inbound(&event).await.unwrap();
+        assert_eq!(evt.content, "group message");
         assert!(evt.is_group);
         assert_eq!(evt.chat_id, "group:group456");
     }
@@ -1764,16 +1766,18 @@ mod tests {
                 "chattype": "1",
                 "from": {"userid": "user1"},
                 "msgtype": "mixed",
-                "mixed": [
-                    {"msgtype": "text", "text": {"content": "text before"}},
-                    {"msgtype": "image", "image": {"url": "http://..."}},
-                    {"msgtype": "text", "text": {"content": "text after"}},
-                ],
+                "mixed": {
+                    "msg_item": [
+                        {"msgtype": "text", "text": {"content": "part1"}},
+                        {"msgtype": "image"},
+                        {"msgtype": "text", "text": {"content": "part2"}}
+                    ]
+                },
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
         let evt = adapter.handle_inbound(&event).await.unwrap();
-        assert_eq!(evt.content, "text before\ntext after");
+        assert_eq!(evt.content, "part1\npart2");
     }
 
     #[tokio::test]
@@ -1784,12 +1788,12 @@ mod tests {
                 "chattype": "1",
                 "from": {"userid": "user1"},
                 "msgtype": "voice",
-                "voice": {"content": "语音消息"},
+                "voice": {"content": "voice transcription"},
             }
         });
         let adapter = WeComAdapter::new(WeComConfig::default());
         let evt = adapter.handle_inbound(&event).await.unwrap();
-        assert_eq!(evt.content, "语音消息");
+        assert_eq!(evt.content, "voice transcription");
     }
 
     #[tokio::test]
@@ -1813,14 +1817,16 @@ mod tests {
         let adapter = WeComAdapter::new(WeComConfig::default());
         let event = serde_json::json!({
             "body": {
-                "msgid": "dedup_wecom_1",
+                "msgid": "dup_msg_1",
                 "chattype": "1",
                 "from": {"userid": "user1"},
-                "text": {"content": "hello"},
+                "msgtype": "text",
+                "text": {"content": "first"},
             }
         });
-        assert!(adapter.handle_inbound(&event).await.is_some());
-        assert!(adapter.handle_inbound(&event).await.is_none());
+        let _ = adapter.handle_inbound(&event).await.unwrap();
+        let second = adapter.handle_inbound(&event).await;
+        assert!(second.is_none());
     }
 
     #[tokio::test]
@@ -1859,5 +1865,71 @@ mod tests {
         let evt = adapter.handle_inbound(&event).await.unwrap();
         assert_eq!(evt.reply_to_text, Some("this is a reply".to_string()));
         assert_eq!(evt.content, "hello");
+    }
+
+    #[test]
+    fn test_truncate_text() {
+        assert_eq!(truncate_text("hello", 10), "hello");
+        let long = "a".repeat(100);
+        assert_eq!(truncate_text(&long, 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn test_extract_text_plain() {
+        let body = serde_json::json!({"text": {"content": "hello"}});
+        let (text, _) = WeComAdapter::extract_text(&body);
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn test_extract_text_voice() {
+        let body = serde_json::json!({
+            "msgtype": "voice",
+            "voice": {"content": "voice text"}
+        });
+        let (text, _) = WeComAdapter::extract_text(&body);
+        assert_eq!(text, "voice text");
+    }
+
+    #[test]
+    fn test_mime_for_ext() {
+        assert_eq!(WeComAdapter::mime_for_ext(".jpg"), "image/jpeg");
+        assert_eq!(WeComAdapter::mime_for_ext(".jpeg"), "image/jpeg");
+        assert_eq!(WeComAdapter::mime_for_ext(".png"), "image/png");
+        assert_eq!(WeComAdapter::mime_for_ext(".pdf"), "application/pdf");
+        assert_eq!(WeComAdapter::mime_for_ext(".unknown"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_guess_extension() {
+        assert_eq!(WeComAdapter::guess_extension("http://x.com/a.jpg", "image/jpeg", ".bin"), ".jpg");
+        assert_eq!(WeComAdapter::guess_extension("http://x.com/a", "image/png", ".bin"), ".png");
+        assert_eq!(WeComAdapter::guess_extension("http://x.com/a", "application/pdf", ".bin"), ".pdf");
+        assert_eq!(WeComAdapter::guess_extension("http://x.com/a.unknown", "application/zip", ".bin"), ".unknown");
+    }
+
+    #[test]
+    fn test_looks_like_image() {
+        let png = b"\x89PNG\r\n\x1a\n";
+        assert!(WeComAdapter::looks_like_image(png));
+        let jpeg = &[0xFF, 0xD8, 0xFF, 0xE0];
+        assert!(WeComAdapter::looks_like_image(jpeg));
+        let text = b"hello world";
+        assert!(!WeComAdapter::looks_like_image(text));
+        assert!(!WeComAdapter::looks_like_image(&[0x89]));
+    }
+
+    #[test]
+    fn test_detect_image_ext() {
+        assert_eq!(WeComAdapter::detect_image_ext(b"\x89PNG\r\n\x1a\n"), ".png");
+        assert_eq!(WeComAdapter::detect_image_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), ".jpg");
+        assert_eq!(WeComAdapter::detect_image_ext(b"GIF89a"), ".gif");
+        assert_eq!(WeComAdapter::detect_image_ext(b"unknown"), ".jpg");
+    }
+
+    #[test]
+    fn test_decrypt_aes_256_cbc_invalid() {
+        let result = WeComAdapter::decrypt_aes_256_cbc(b"invalid", "not_base64!!!");
+        assert!(result.is_err());
     }
 }

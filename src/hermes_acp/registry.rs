@@ -33,7 +33,7 @@ pub struct RegisteredAgent {
     pub capabilities: Vec<String>,
     /// Transport endpoint: "stdio", "tcp://host:port", or "unix:/path".
     pub endpoint: String,
-    /// Last heartbeat timestamp (seconds since epoch).
+    /// Last heartbeat timestamp (milliseconds since epoch).
     pub last_heartbeat: u64,
     /// Registration timestamp.
     pub registered_at: u64,
@@ -112,7 +112,7 @@ impl AgentRegistry {
         let agent_id = uuid::Uuid::new_v4().to_string();
         let now = Instant::now().elapsed().as_secs();
         // Use chrono for real timestamp
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = chrono::Utc::now().timestamp_millis() as u64;
 
         let agent = RegisteredAgent {
             agent_id: agent_id.clone(),
@@ -155,13 +155,13 @@ impl AgentRegistry {
     /// Discover agents matching filters.
     pub async fn discover(&self, req: &DiscoverRequest) -> DiscoverResponse {
         let agents = self.agents.read().await;
-        let now = chrono::Utc::now().timestamp() as u64;
-        let timeout_secs = self.heartbeat_timeout.as_secs();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let timeout_millis = self.heartbeat_timeout.as_millis() as u64;
 
         let mut results = Vec::new();
         for agent in agents.values() {
             // Skip stale agents
-            if now - agent.last_heartbeat > timeout_secs {
+            if now - agent.last_heartbeat > timeout_millis {
                 continue;
             }
 
@@ -204,10 +204,10 @@ impl AgentRegistry {
     /// Remove stale agents (no heartbeat within timeout).
     pub async fn purge_stale(&self) -> usize {
         let mut agents = self.agents.write().await;
-        let now = chrono::Utc::now().timestamp() as u64;
-        let timeout_secs = self.heartbeat_timeout.as_secs();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let timeout_millis = self.heartbeat_timeout.as_millis() as u64;
         let before = agents.len();
-        agents.retain(|_id, agent| now - agent.last_heartbeat <= timeout_secs);
+        agents.retain(|_id, agent| now - agent.last_heartbeat <= timeout_millis);
         let removed = before - agents.len();
         if removed > 0 {
             tracing::info!("Purged {} stale agents", removed);

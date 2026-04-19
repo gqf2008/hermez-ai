@@ -1237,3 +1237,170 @@ fn guess_mime_from_path(path: &str) -> String {
         "application/octet-stream".to_string()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> QqbotConfig {
+        QqbotConfig {
+            app_id: "test_app".into(),
+            client_secret: "test_secret".into(),
+            markdown_support: false,
+            dm_policy: "open".into(),
+            allow_from: vec![],
+            group_policy: "open".into(),
+            group_allow_from: vec![],
+        }
+    }
+
+    fn test_adapter() -> QqbotAdapter {
+        QqbotAdapter::new(test_config())
+    }
+
+    #[test]
+    fn test_split_qq_message_short() {
+        let text = "Hello world";
+        let chunks = split_qq_message(text);
+        assert_eq!(chunks, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn test_split_qq_message_exact_limit() {
+        let text = "a".repeat(MAX_MESSAGE_LENGTH);
+        let chunks = split_qq_message(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_split_qq_message_over_limit_splits_at_newline() {
+        let part1 = "Line1\n".repeat(MAX_MESSAGE_LENGTH / 6);
+        let text = format!("{}\n{}more", part1, "x".repeat(MAX_MESSAGE_LENGTH));
+        let chunks = split_qq_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= MAX_MESSAGE_LENGTH);
+        }
+    }
+
+    #[test]
+    fn test_guess_mime_from_path() {
+        assert_eq!(guess_mime_from_path("photo.jpg"), "image/jpeg");
+        assert_eq!(guess_mime_from_path("image.PNG"), "image/png");
+        assert_eq!(guess_mime_from_path("doc.pdf"), "application/pdf");
+        assert_eq!(guess_mime_from_path("song.mp3"), "audio/mpeg");
+        assert_eq!(guess_mime_from_path("video.mp4"), "video/mp4");
+        assert_eq!(guess_mime_from_path("unknown.xyz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_is_url() {
+        assert!(is_url("https://example.com"));
+        assert!(is_url("http://localhost:8080"));
+        assert!(!is_url("/path/to/file"));
+        assert!(!is_url("just text"));
+    }
+
+    #[test]
+    fn test_strip_at_mention() {
+        let adapter = test_adapter();
+        assert_eq!(adapter.strip_at_mention("@bot hello"), "hello");
+        assert_eq!(adapter.strip_at_mention("  @bot   hello  "), "hello");
+        assert_eq!(adapter.strip_at_mention("no mention"), "no mention");
+    }
+
+    #[test]
+    fn test_is_dm_allowed_open() {
+        let adapter = test_adapter();
+        assert!(adapter.is_dm_allowed("any_user"));
+    }
+
+    #[test]
+    fn test_is_dm_allowed_disabled() {
+        let mut config = test_config();
+        config.dm_policy = "disabled".into();
+        let adapter = QqbotAdapter::new(config);
+        assert!(!adapter.is_dm_allowed("any_user"));
+    }
+
+    #[test]
+    fn test_is_dm_allowed_allowlist() {
+        let mut config = test_config();
+        config.dm_policy = "allowlist".into();
+        config.allow_from = vec!["user1".into(), "user2".into()];
+        let adapter = QqbotAdapter::new(config);
+        assert!(adapter.is_dm_allowed("user1"));
+        assert!(!adapter.is_dm_allowed("user3"));
+    }
+
+    #[test]
+    fn test_entry_matches_wildcard() {
+        let adapter = test_adapter();
+        assert!(adapter.entry_matches(&["*".into()], "anything"));
+        assert!(adapter.entry_matches(&["Target".into()], "target"));
+        assert!(!adapter.entry_matches(&["other".into()], "target"));
+    }
+
+    #[test]
+    fn test_parse_qq_timestamp_rfc3339() {
+        let adapter = test_adapter();
+        let dt = adapter.parse_qq_timestamp("2024-01-15T10:30:00Z");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_parse_qq_timestamp_millis() {
+        let adapter = test_adapter();
+        let dt = adapter.parse_qq_timestamp("1705315800000");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_parse_qq_timestamp_empty() {
+        let adapter = test_adapter();
+        let dt = adapter.parse_qq_timestamp("");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_build_text_body_plain() {
+        let adapter = test_adapter();
+        let body = adapter.build_text_body("hello");
+        assert_eq!(body["content"], "hello");
+        assert_eq!(body["msg_type"], MSG_TYPE_TEXT);
+    }
+
+    #[test]
+    fn test_build_text_body_markdown() {
+        let mut config = test_config();
+        config.markdown_support = true;
+        let adapter = QqbotAdapter::new(config);
+        let body = adapter.build_text_body("hello");
+        assert_eq!(body["msg_type"], MSG_TYPE_MARKDOWN);
+        assert_eq!(body["markdown"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_build_text_body_truncates() {
+        let adapter = test_adapter();
+        let long = "x".repeat(MAX_MESSAGE_LENGTH + 100);
+        let body = adapter.build_text_body(&long);
+        let content = body["content"].as_str().unwrap();
+        assert_eq!(content.chars().count(), MAX_MESSAGE_LENGTH);
+    }
+
+    #[test]
+    fn test_is_group_allowed() {
+        let mut config = test_config();
+        config.group_policy = "allowlist".into();
+        config.group_allow_from = vec!["group1".into()];
+        let adapter = QqbotAdapter::new(config);
+        assert!(adapter.is_group_allowed("group1", "user"));
+        assert!(!adapter.is_group_allowed("group2", "user"));
+    }
+}

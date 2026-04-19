@@ -30,6 +30,7 @@ pub mod config_cmd;
 pub mod cron_cmd;
 pub mod dashboard_cmd;
 pub mod debug_cmd;
+pub mod web_server;
 pub mod debug_share_cmd;
 pub mod display;
 pub mod doctor_cmd;

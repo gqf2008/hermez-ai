@@ -373,6 +373,9 @@ pub enum Commands {
         /// Disable HTTPS redirect (testing)
         #[arg(long)]
         insecure: bool,
+        /// Serve web dashboard over HTTP instead of TUI
+        #[arg(long)]
+        serve: bool,
     },
     /// Configure WhatsApp Cloud API
     WhatsApp {

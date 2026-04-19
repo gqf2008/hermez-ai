@@ -1589,4 +1589,34 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(ContextTokenStore::path());
     }
+
+    #[test]
+    fn test_parse_comma_list() {
+        assert_eq!(parse_comma_list("a,b,c"), vec!["a", "b", "c"]);
+        assert_eq!(parse_comma_list("  a  ,  b  "), vec!["a", "b"]);
+        assert!(parse_comma_list("").is_empty());
+    }
+
+    #[test]
+    fn test_content_hash_length() {
+        let h = WeixinAdapter::content_hash(b"test");
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn test_normalize_markdown_blocks() {
+        let input = "```\ncode\n```";
+        let out = normalize_markdown_blocks(input);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_is_duplicate_and_record() {
+        let config = WeixinConfig::from_env();
+        let adapter = WeixinAdapter::new(config);
+        assert!(!adapter.is_duplicate("msg1"));
+        adapter.record_seen("msg1".into());
+        assert!(adapter.is_duplicate("msg1"));
+        assert!(!adapter.is_duplicate("msg2"));
+    }
 }
