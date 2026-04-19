@@ -278,9 +278,13 @@ impl GatewayRunner {
                     self.api_server_adapter = Some(Arc::new(ApiServerAdapter::new(api_config)));
                 }
                 Platform::Dingtalk => {
-                    let dingtalk_config = DingtalkConfig::from_env();
+                    let dingtalk_config = DingtalkConfig::from_extra(&entry.config.extra);
                     if !dingtalk_config.client_id.is_empty() && !dingtalk_config.client_secret.is_empty() {
-                        info!("Initializing Dingtalk adapter...");
+                        let mode_str = match dingtalk_config.connection_mode {
+                            crate::platforms::dingtalk::DingtalkConnectionMode::Stream => "Stream",
+                            crate::platforms::dingtalk::DingtalkConnectionMode::Webhook => "Webhook",
+                        };
+                        info!("Initializing Dingtalk adapter ({mode_str} mode)...");
                         self.dingtalk_adapter =
                             Some(Arc::new(DingtalkAdapter::new(dingtalk_config)));
                     } else {
@@ -456,7 +460,7 @@ impl GatewayRunner {
             let running = self.running.clone();
             let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
             let handle = tokio::spawn(async move {
-                adapter.run(handler, running).await;
+                Arc::clone(&adapter).run(handler, running).await;
             });
             self.discord_shutdown_tx.push(shutdown_tx);
             handles.push(handle);
@@ -785,8 +789,15 @@ impl GatewayRunner {
                 }
                 FeishuConnectionMode::WebSocket => {
                     let ws_client = crate::platforms::feishu_ws::FeishuWsClient::new(adapter.config.clone());
+                    let adapter = adapter.clone();
                     let handle = tokio::spawn(async move {
-                        ws_client.run(handler).await;
+                        let callback: crate::platforms::feishu_ws::WsEventCallback = std::sync::Arc::new(move |event: serde_json::Value| {
+                            let adapter = adapter.clone();
+                            tokio::spawn(async move {
+                                adapter.process_ws_event(event).await;
+                            });
+                        });
+                        ws_client.run(callback).await;
                     });
                     handles.push(handle);
                 }
@@ -825,18 +836,29 @@ impl GatewayRunner {
             handles.push(handle);
         }
 
-        // Dingtalk: start webhook HTTP server
+        // Dingtalk: start stream or webhook depending on config
         if let Some(adapter) = &self.dingtalk_adapter {
             let adapter = adapter.clone();
             let handler = self.message_handler.clone();
-            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = adapter.run(handler, shutdown_rx).await {
-                    error!("Dingtalk webhook error: {e}");
+            match adapter.config.connection_mode {
+                crate::platforms::dingtalk::DingtalkConnectionMode::Stream => {
+                    let running = self.running.clone();
+                    let handle = tokio::spawn(async move {
+                        adapter.run_stream(handler, running).await;
+                    });
+                    handles.push(handle);
                 }
-            });
-            self.dingtalk_shutdown_tx.push(shutdown_tx);
-            handles.push(handle);
+                crate::platforms::dingtalk::DingtalkConnectionMode::Webhook => {
+                    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = adapter.run(handler, shutdown_rx).await {
+                            error!("Dingtalk webhook error: {e}");
+                        }
+                    });
+                    self.dingtalk_shutdown_tx.push(shutdown_tx);
+                    handles.push(handle);
+                }
+            }
         }
 
         // WhatsApp: connect bridge and start polling
@@ -989,6 +1011,12 @@ impl GatewayRunner {
         let senders = std::mem::take(&mut self.dingtalk_shutdown_tx);
         for tx in senders {
             let _ = tx.send(());
+        }
+        // Disconnect Dingtalk stream adapter
+        if let Some(adapter) = self.dingtalk_adapter.take() {
+            tokio::spawn(async move {
+                adapter.disconnect().await;
+            });
         }
         // Trigger Feishu webhook graceful shutdown
         let senders = std::mem::take(&mut self.feishu_shutdown_tx);

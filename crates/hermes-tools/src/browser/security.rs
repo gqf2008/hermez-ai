@@ -52,9 +52,19 @@ const PREFIX_PATTERNS: &[&str] = &[
     r"gsk_[A-Za-z0-9]{10,}",
 ];
 
+/// Compiled regex for secret detection.
+/// Uses capturing groups for prefix/suffix so we can verify boundaries
+/// without look-around assertions (unsupported by the `regex` crate).
 static PREFIX_RE: Lazy<Regex> = Lazy::new(|| {
     let alts = PREFIX_PATTERNS.join("|");
-    Regex::new(&format!(r"(?i)(?<![A-Za-z0-9_-])({})(?![A-Za-z0-9_-])", alts)).unwrap()
+    // Group 1 = prefix (start-of-string or non-word char)
+    // Group 2 = the secret token itself
+    // Group 3 = suffix (end-of-string or non-word char)
+    Regex::new(&format!(
+        r"(?i)(^|[^A-Za-z0-9_-])({})([^A-Za-z0-9_-]|$)",
+        alts
+    ))
+    .unwrap()
 });
 
 /// Naïve percent-decode — sufficient for ASCII token detection.
@@ -64,7 +74,10 @@ fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+            if let Ok(v) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
                 out.push(v as char);
                 i += 3;
                 continue;
@@ -79,7 +92,15 @@ fn percent_decode(input: &str) -> String {
 /// Check if a URL contains embedded API keys or tokens.
 pub fn contains_secret_token(url: &str) -> bool {
     let decoded = percent_decode(url);
-    PREFIX_RE.is_match(url) || PREFIX_RE.is_match(&decoded)
+    for target in [url, &decoded] {
+        for caps in PREFIX_RE.captures_iter(target) {
+            let token = caps.get(2);
+            if token.is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ============================================================================

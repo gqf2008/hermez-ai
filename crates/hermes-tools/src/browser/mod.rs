@@ -10,6 +10,7 @@
 pub mod camofox;
 pub mod providers;
 pub mod resolver;
+pub mod security;
 pub mod session;
 
 use std::sync::Arc;
@@ -28,6 +29,9 @@ static SESSION_MANAGER: std::sync::LazyLock<Arc<BrowserSessionManager>> =
 /// Resolve the browser backend (cached per process).
 static RESOLVED_BACKEND: std::sync::LazyLock<BrowserBackend> =
     std::sync::LazyLock::new(|| resolver::resolve_backend(None));
+
+/// Max characters for snapshot content before summarization.
+const SNAPSHOT_SUMMARIZE_THRESHOLD: usize = 8000;
 
 /// Get the task_id from args, or use a default.
 fn get_task_id(args: &Value) -> String {
@@ -87,35 +91,24 @@ pub fn handle_browser(action: &str, args: &Value) -> Result<String, hermes_core:
     }
 }
 
-/// Build the agent-browser command args based on backend.
-fn build_browser_args(extra_args: &[&str]) -> Vec<String> {
-    let mut args = Vec::new();
+// ============================================================================
+// Low-level agent-browser runner
+// ============================================================================
 
-    match &*RESOLVED_BACKEND {
-        BrowserBackend::DirectCdp(cdp_url) => {
-            args.push("--cdp".to_string());
-            args.push(cdp_url.clone());
-        }
-        BrowserBackend::Cloud(_) => {
-            // Cloud mode: session is created lazily by the navigate handler
-            // For now, pass through with session name
-        }
-        BrowserBackend::Local => {
-            // Local mode: use session name
-        }
-        BrowserBackend::Camofox => {
-            // Camofox uses REST API, not agent-browser CLI
-        }
+/// Return a short temp directory path suitable for Unix domain sockets.
+/// On macOS we bypass the long `TMPDIR` and use `/tmp` directly.
+fn socket_safe_tmpdir() -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
     }
-
-    for arg in extra_args {
-        args.push(arg.to_string());
-    }
-
-    args
 }
 
 /// Run an `agent-browser` command and return (stdout, stderr, success).
+///
+/// This basic variant does **not** inject `--session` / `--cdp` or `--json`.
+/// Use `run_browser_json` when structured output is required.
 fn run_agent_browser(args: &[&str]) -> Result<(String, String, bool), String> {
     let output = std::process::Command::new("agent-browser")
         .args(args)
@@ -131,7 +124,177 @@ fn run_agent_browser(args: &[&str]) -> Result<(String, String, bool), String> {
     Ok((stdout, stderr, success))
 }
 
-// --- Browser actions ---
+/// Build the full command for a task-aware browser operation.
+///
+/// Injects `--session` (local) or `--cdp` (cloud/direct) and `--json`
+/// automatically.  Sets `AGENT_BROWSER_SOCKET_DIR` so parallel tasks don't
+/// collide on the same socket path.
+fn run_browser_json(
+    task_id: &str,
+    command: &str,
+    extra_args: &[&str],
+) -> Result<Value, String> {
+    // Resolve session info
+    let session = SESSION_MANAGER.get_session(task_id);
+
+    let mut cmd = std::process::Command::new("agent-browser");
+
+    // Backend args
+    if let Some(ref info) = session {
+        if let Some(ref cdp) = info.cdp_url {
+            cmd.arg("--cdp").arg(cdp);
+        } else {
+            cmd.arg("--session").arg(&info.session_name);
+        }
+    } else {
+        // No session yet — local fallback
+        match &*RESOLVED_BACKEND {
+            BrowserBackend::DirectCdp(cdp_url) => {
+                cmd.arg("--cdp").arg(cdp_url);
+            }
+            _ => {
+                cmd.arg("--session").arg(format!("hermes-{task_id}"));
+            }
+        }
+    }
+
+    // JSON mode + command + args
+    cmd.arg("--json").arg(command);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+
+    // Socket dir to prevent cross-task conflicts
+    let session_name = session.as_ref().map(|s| s.session_name.as_str()).unwrap_or("default");
+    let socket_dir = socket_safe_tmpdir().join(format!("agent-browser-{session_name}"));
+    let _ = std::fs::create_dir_all(&socket_dir);
+    cmd.env("AGENT_BROWSER_SOCKET_DIR", &socket_dir);
+
+    let output = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("agent-browser not available: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let err = if stderr.is_empty() {
+            format!("agent-browser '{command}' failed")
+        } else {
+            format!("agent-browser '{command}' failed: {}", stderr.trim())
+        };
+        return Err(err);
+    }
+
+    if stdout.trim().is_empty() {
+        return Err(format!("agent-browser '{command}' returned empty output"));
+    }
+
+    match serde_json::from_str::<Value>(&stdout) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!(
+            "agent-browser '{command}' returned non-JSON output: {e} | raw: {}",
+            &stdout[..stdout.len().min(200)]
+        )),
+    }
+}
+
+// ============================================================================
+// Snapshot summarization
+// ============================================================================
+
+/// Structure-aware truncation for snapshots.
+/// Cuts at line boundaries so accessibility-tree elements are never split.
+fn truncate_snapshot(snapshot_text: &str, max_chars: usize) -> String {
+    if snapshot_text.len() <= max_chars {
+        return snapshot_text.to_string();
+    }
+    let lines: Vec<&str> = snapshot_text.split('\n').collect();
+    let mut result: Vec<String> = Vec::new();
+    let mut chars = 0usize;
+    for line in &lines {
+        if chars + line.len() + 1 > max_chars.saturating_sub(80) {
+            break;
+        }
+        result.push(line.to_string());
+        chars += line.len() + 1;
+    }
+    let remaining = lines.len().saturating_sub(result.len());
+    if remaining > 0 {
+        result.push(format!(
+            "[... {remaining} more lines truncated, use browser_snapshot for full content]"
+        ));
+    }
+    result.join("\n")
+}
+
+/// Use an auxiliary LLM to extract relevant content from a snapshot.
+/// Falls back to `truncate_snapshot` when no model is available or on error.
+fn extract_relevant_content(snapshot_text: &str, user_task: Option<&str>) -> String {
+    let extraction_prompt = if let Some(task) = user_task {
+        format!(
+            "You are a content extractor for a browser automation agent.\n\n\
+             The user's task is: {task}\n\n\
+             Given the following page snapshot (accessibility tree representation), \
+             extract and summarize the most relevant information for completing this task. Focus on:\n\
+             1. Interactive elements (buttons, links, inputs) that might be needed\n\
+             2. Text content relevant to the task (prices, descriptions, headings, important info)\n\
+             3. Navigation structure if relevant\n\n\
+             Keep ref IDs (like [ref=e5]) for interactive elements so the agent can use them.\n\n\
+             Page Snapshot:\n{snapshot_text}\n\n\
+             Provide a concise summary that preserves actionable information and relevant content."
+        )
+    } else {
+        format!(
+            "Summarize this page snapshot, preserving:\n\
+             1. All interactive elements with their ref IDs (like [ref=e5])\n\
+             2. Key text content and headings\n\
+             3. Important information visible on the page\n\n\
+             Page Snapshot:\n{snapshot_text}\n\n\
+             Provide a concise summary focused on interactive elements and key content."
+        )
+    };
+
+    let messages = vec![serde_json::json!({
+        "role": "user",
+        "content": extraction_prompt,
+    })];
+
+    let response = hermes_llm::auxiliary_client::call_llm(
+        Some("web_extract"),
+        None,
+        None,
+        None,
+        None,
+        messages,
+        Some(0.1),
+        Some(4000),
+        None,
+        None,
+        None,
+    );
+
+    match response {
+        Ok(resp) => {
+            let extracted = resp.content.trim().to_string();
+            if extracted.is_empty() {
+                truncate_snapshot(snapshot_text, SNAPSHOT_SUMMARIZE_THRESHOLD)
+            } else {
+                extracted
+            }
+        }
+        Err(e) => {
+            tracing::debug!("Snapshot LLM extraction failed: {e}");
+            truncate_snapshot(snapshot_text, SNAPSHOT_SUMMARIZE_THRESHOLD)
+        }
+    }
+}
+
+// ============================================================================
+// Browser actions
+// ============================================================================
 
 fn browser_navigate(args: &Value) -> Result<String, hermes_core::HermesError> {
     let url = match args.get("url").and_then(Value::as_str) {
@@ -140,6 +303,34 @@ fn browser_navigate(args: &Value) -> Result<String, hermes_core::HermesError> {
     };
 
     let task_id = get_task_id(args);
+
+    // --- Secret exfiltration guard ---
+    if security::contains_secret_token(&url) {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs.",
+        }).to_string());
+    }
+
+    // --- SSRF protection (pre-navigate) ---
+    if !security::is_local_backend(&RESOLVED_BACKEND)
+        && !security::allow_private_urls()
+        && !crate::url_safety::is_safe_url(&url)
+    {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": "Blocked: URL targets a private or internal address",
+        }).to_string());
+    }
+
+    // --- Website policy check ---
+    if let Some(blocked) = crate::website_policy::WebsitePolicy::load().check_access(&url) {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": blocked.get("blocked").map(|s| s.as_str()).unwrap_or("Blocked by policy"),
+            "blocked_by_policy": blocked,
+        }).to_string());
+    }
 
     // Camofox backend
     if matches!(&*RESOLVED_BACKEND, BrowserBackend::Camofox) {
@@ -152,25 +343,80 @@ fn browser_navigate(args: &Value) -> Result<String, hermes_core::HermesError> {
     }
 
     // Direct CDP or Local: use agent-browser CLI
-    let cmd_args = build_browser_args(&["open", &url]);
-    let str_args: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+    let result = match run_browser_json(&task_id, "open", &[&url]) {
+        Ok(json) => json,
+        Err(e) => {
+            return Ok(tool_error(&e));
+        }
+    };
 
-    match run_agent_browser(&str_args) {
-        Ok((stdout, stderr, success)) => {
-            if success {
-                SESSION_MANAGER.register_local(&task_id, &format!("local-{task_id}"));
-                Ok(serde_json::json!({
-                    "success": true,
-                    "action": "navigate",
-                    "url": url,
-                    "result": stdout.trim(),
-                })
-                .to_string())
-            } else {
-                Ok(tool_error(format!("Navigate failed: {stderr}")))
+    if result.get("success").and_then(Value::as_bool).unwrap_or(false) {
+        let data = result.get("data").cloned().unwrap_or(Value::Object(Default::default()));
+        let title = data.get("title").and_then(Value::as_str).unwrap_or("");
+        let final_url = data.get("url").and_then(Value::as_str).unwrap_or(&url);
+
+        // Post-redirect SSRF check
+        if !security::is_local_backend(&RESOLVED_BACKEND)
+            && !security::allow_private_urls()
+            && final_url != url
+            && !crate::url_safety::is_safe_url(final_url)
+        {
+            // Navigate away to blank page to prevent snapshot leaks
+            let _ = run_browser_json(&task_id, "open", &["about:blank"]);
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Blocked: redirect landed on a private/internal address",
+            }).to_string());
+        }
+
+        let mut response = serde_json::json!({
+            "success": true,
+            "action": "navigate",
+            "url": final_url,
+            "title": title,
+        });
+
+        // Bot detection
+        if let Some(warning) = security::detect_bot_blocked(title) {
+            response["bot_detection_warning"] = Value::String(warning);
+        }
+
+        // Register local session and update activity
+        SESSION_MANAGER.register_local(&task_id, &format!("hermes-{task_id}"));
+        SESSION_MANAGER.update_activity(&task_id);
+
+        // Auto-snapshot after navigate (compact mode)
+        match run_browser_json(&task_id, "snapshot", &["-c"]) {
+            Ok(snap) => {
+                if snap.get("success").and_then(Value::as_bool).unwrap_or(false) {
+                    let snap_data = snap.get("data").cloned().unwrap_or(Value::Null);
+                    let mut snapshot_text = snap_data
+                        .get("snapshot")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let refs = snap_data.get("refs").cloned().unwrap_or(Value::Null);
+                    if snapshot_text.len() > SNAPSHOT_SUMMARIZE_THRESHOLD {
+                        snapshot_text = truncate_snapshot(&snapshot_text, SNAPSHOT_SUMMARIZE_THRESHOLD);
+                    }
+                    response["snapshot"] = Value::String(snapshot_text);
+                    response["element_count"] = Value::Number(
+                        refs.as_object().map(|m| m.len()).unwrap_or(0).into(),
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Auto-snapshot after navigate failed: {e}");
             }
         }
-        Err(e) => Ok(tool_error(&e)),
+
+        Ok(response.to_string())
+    } else {
+        let err = result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Navigation failed");
+        Ok(tool_error(err))
     }
 }
 
@@ -183,17 +429,17 @@ async fn camofox_navigate_async(url: String, task_id: String) -> Result<String, 
 
     SESSION_MANAGER.register_camofox(&task_id, &user_id, &tab_id);
 
-    Ok(serde_json::json!({
+    let response = serde_json::json!({
         "success": true,
         "action": "navigate",
         "url": url,
         "result": result.trim(),
-    })
-    .to_string())
+    });
+
+    Ok(response.to_string())
 }
 
 fn browser_navigate_camofox(url: &str, task_id: &str) -> Result<String, hermes_core::HermesError> {
-    // Camofox requires async I/O; use a blocking runtime for simplicity
     let url = url.to_string();
     let task_id = task_id.to_string();
     block_on_browser(camofox_navigate_async(url, task_id))
@@ -252,66 +498,101 @@ fn browser_navigate_cloud(
 
 fn browser_snapshot(args: &Value) -> Result<String, hermes_core::HermesError> {
     let task_id = get_task_id(args);
-    let interactive = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+    let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+    let user_task = args.get("user_task").and_then(Value::as_str);
+
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox snapshot
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
-        return browser_snapshot_camofox(&task_id);
+        return browser_snapshot_camofox(&task_id, full, user_task);
     }
 
-    let cmd_args = if interactive {
-        vec!["snapshot", "-i"]
-    } else {
-        vec!["snapshot"]
+    let extra = if full { vec![] } else { vec!["-c"] };
+    let extra_refs: Vec<&str> = extra.to_vec();
+
+    let result = match run_browser_json(&task_id, "snapshot", &extra_refs) {
+        Ok(json) => json,
+        Err(e) => return Ok(tool_error(&e)),
     };
 
-    match run_agent_browser(&cmd_args) {
-        Ok((stdout, stderr, success)) => {
-            if success {
-                let ref_count = stdout.matches("ref=").count();
-                let line_count = stdout.lines().count();
-                Ok(serde_json::json!({
-                    "success": true,
-                    "action": "snapshot",
-                    "snapshot": stdout,
-                    "elements": ref_count,
-                    "lines": line_count,
-                })
-                .to_string())
+    if result.get("success").and_then(Value::as_bool).unwrap_or(false) {
+        let data = result.get("data").cloned().unwrap_or(Value::Null);
+        let mut snapshot_text = data
+            .get("snapshot")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let refs = data.get("refs").cloned().unwrap_or(Value::Null);
+
+        if snapshot_text.len() > SNAPSHOT_SUMMARIZE_THRESHOLD {
+            if user_task.is_some() {
+                snapshot_text = extract_relevant_content(&snapshot_text, user_task);
             } else {
-                Ok(tool_error(format!("Snapshot failed: {stderr}")))
+                snapshot_text = truncate_snapshot(&snapshot_text, SNAPSHOT_SUMMARIZE_THRESHOLD);
             }
         }
-        Err(e) => Ok(tool_error(&e)),
+
+        Ok(serde_json::json!({
+            "success": true,
+            "action": "snapshot",
+            "snapshot": snapshot_text,
+            "elements": refs.as_object().map(|m| m.len()).unwrap_or(0),
+        })
+        .to_string())
+    } else {
+        let err = result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Failed to get snapshot");
+        Ok(tool_error(err))
     }
 }
 
 /// Camofox snapshot via accessibility tree.
-async fn camofox_snapshot_async(task_id: String, _full: bool) -> Result<String, String> {
+async fn camofox_snapshot_async(
+    task_id: String,
+    _full: bool,
+    user_task: Option<String>,
+) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
     let tab_id = info.camofox_tab_id.ok_or("Missing tab_id")?;
 
     let snapshot = client.snapshot(&tab_id, &user_id).await?;
-    let ref_count = snapshot.matches("ref=").count();
-    let line_count = snapshot.lines().count();
+    let mut snapshot_text = snapshot;
+
+    if snapshot_text.len() > SNAPSHOT_SUMMARIZE_THRESHOLD {
+        if user_task.is_some() {
+            snapshot_text = extract_relevant_content(&snapshot_text, user_task.as_deref());
+        } else {
+            snapshot_text = truncate_snapshot(&snapshot_text, SNAPSHOT_SUMMARIZE_THRESHOLD);
+        }
+    }
+
+    let ref_count = snapshot_text.matches("ref=").count();
 
     Ok(serde_json::json!({
         "success": true,
         "action": "snapshot",
-        "snapshot": snapshot,
+        "snapshot": snapshot_text,
         "elements": ref_count,
-        "lines": line_count,
     })
     .to_string())
 }
 
-fn browser_snapshot_camofox(task_id: &str) -> Result<String, hermes_core::HermesError> {
+fn browser_snapshot_camofox(
+    task_id: &str,
+    full: bool,
+    user_task: Option<&str>,
+) -> Result<String, hermes_core::HermesError> {
     let task_id = task_id.to_string();
-    block_on_browser(camofox_snapshot_async(task_id, false))
+    let user_task = user_task.map(|s| s.to_string());
+    block_on_browser(camofox_snapshot_async(task_id, full, user_task))
 }
 
 fn browser_click(args: &Value) -> Result<String, hermes_core::HermesError> {
@@ -321,6 +602,7 @@ fn browser_click(args: &Value) -> Result<String, hermes_core::HermesError> {
     };
 
     let task_id = get_task_id(args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox click
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
@@ -347,7 +629,8 @@ fn browser_click(args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_click_async(ref_id: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -380,6 +663,7 @@ fn browser_type(args: &Value) -> Result<String, hermes_core::HermesError> {
     };
 
     let task_id = get_task_id(args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox type
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
@@ -407,7 +691,8 @@ fn browser_type(args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_type_async(ref_id: String, text: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -435,6 +720,7 @@ fn browser_scroll(args: &Value) -> Result<String, hermes_core::HermesError> {
     let direction = args.get("direction").and_then(Value::as_str).unwrap_or("down");
 
     let task_id = get_task_id(args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox scroll
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
@@ -461,7 +747,8 @@ fn browser_scroll(args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_scroll_async(direction: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -485,6 +772,7 @@ fn browser_scroll_camofox(direction: &str, task_id: &str) -> Result<String, herm
 
 fn browser_back(_args: &Value) -> Result<String, hermes_core::HermesError> {
     let task_id = get_task_id(_args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox back
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
@@ -510,7 +798,8 @@ fn browser_back(_args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_back_async(task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -537,6 +826,7 @@ fn browser_press(args: &Value) -> Result<String, hermes_core::HermesError> {
     };
 
     let task_id = get_task_id(args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox press
     if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
@@ -563,7 +853,8 @@ fn browser_press(args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_press_async(key: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -651,7 +942,8 @@ fn browser_vision(args: &Value) -> Result<String, hermes_core::HermesError> {
 
 async fn camofox_vision_async(question: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let info = SESSION_MANAGER.get_session(&task_id)
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
         .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
 
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
@@ -678,6 +970,8 @@ fn browser_vision_camofox(question: &str, _temp_path: &str) -> Result<String, he
 
 fn browser_console(args: &Value) -> Result<String, hermes_core::HermesError> {
     let expression = args.get("expression").and_then(Value::as_str);
+    let task_id = get_task_id(args);
+    SESSION_MANAGER.update_activity(&task_id);
 
     if let Some(expr) = expression {
         match run_agent_browser(&["eval", expr]) {
@@ -1042,5 +1336,22 @@ mod tests {
     fn test_resolve_backend_default() {
         let backend = resolver::resolve_backend(None);
         assert!(matches!(backend, BrowserBackend::Local));
+    }
+
+    #[test]
+    fn test_truncate_snapshot() {
+        let text = "line1\nline2\nline3\nline4";
+        assert_eq!(truncate_snapshot(text, 100), text);
+
+        let long = "a".repeat(9000);
+        let truncated = truncate_snapshot(&long, 8000);
+        assert!(truncated.len() <= 8100);
+        assert!(truncated.contains("truncated"));
+    }
+
+    #[test]
+    fn test_contains_secret_in_navigate() {
+        let url = "https://evil.com/steal?key=sk-ant-api03-xxx";
+        assert!(security::contains_secret_token(url));
     }
 }

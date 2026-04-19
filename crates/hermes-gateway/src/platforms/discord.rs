@@ -3,22 +3,24 @@
 //! Mirrors the Python `gateway/platforms/discord.py`.
 //!
 //! Uses Discord's Gateway WebSocket + REST API directly:
-//! - Gateway WebSocket for receiving MESSAGE_CREATE events
-//! - REST API for sending messages/embeds
-//! - Supports text channels, DM channels, and threads
+//! - Gateway WebSocket for receiving MESSAGE_CREATE and INTERACTION_CREATE events
+//! - REST API for sending messages, embeds, files, reactions, and slash commands
+//! - Supports text channels, DM channels, threads, and forum channels
 //!
 //! Does NOT include voice support (see Python adapter for that).
 
-use reqwest::Client;
 use futures::{SinkExt, StreamExt};
+use reqwest::{Client, multipart};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
 
 use crate::dedup::MessageDeduplicator;
+use crate::platforms::helpers::ThreadParticipationTracker;
 
 /// Discord API base URL.
 const API_BASE: &str = "https://discord.com/api/v10";
@@ -28,6 +30,14 @@ const GATEWAY_VERSION: u8 = 10;
 const INTENTS: u32 = 1 | 512 | 4096 | 32768;
 /// Max message length for a single Discord message.
 const MAX_MESSAGE_LENGTH: usize = 2000;
+/// Discord forum channel type value.
+const CHANNEL_TYPE_GUILD_FORUM: u8 = 15;
+/// Discord text channel type value.
+const CHANNEL_TYPE_GUILD_TEXT: u8 = 0;
+/// Near-split threshold for text batching heuristic.
+const SPLIT_THRESHOLD: usize = 1900;
+
+// ── Configuration ───────────────────────────────────────────────────────────
 
 /// Discord platform configuration.
 #[derive(Debug, Clone)]
@@ -36,13 +46,52 @@ pub struct DiscordConfig {
     pub bot_token: String,
     /// Optional: application ID for slash commands.
     pub application_id: Option<String>,
+    /// Reply threading mode: "off", "first" (default), or "all".
+    pub reply_to_mode: String,
+    /// Whether to add 👀/✅/❌ reactions while processing.
+    pub reactions_enabled: bool,
+    /// Auto-create threads on @mention in text channels.
+    pub auto_thread: bool,
+    /// Require @mention in server channels (default true).
+    pub require_mention: bool,
+    /// Allowed user IDs (comma-separated from env).
+    pub allowed_users: HashSet<String>,
+    /// Ignored channel IDs.
+    pub ignored_channels: HashSet<String>,
+    /// Allowed channel IDs (if set, only respond here).
+    pub allowed_channels: HashSet<String>,
+    /// No-thread channel IDs.
+    pub no_thread_channels: HashSet<String>,
+    /// Free-response channel IDs (no mention required).
+    pub free_response_channels: HashSet<String>,
 }
 
 impl Default for DiscordConfig {
     fn default() -> Self {
+        let bot_token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default();
+        let parse_csv = |key: &str| {
+            std::env::var(key)
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<HashSet<_>>()
+        };
+
         Self {
-            bot_token: std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default(),
+            bot_token: bot_token.clone(),
             application_id: std::env::var("DISCORD_APPLICATION_ID").ok(),
+            reply_to_mode: std::env::var("DISCORD_REPLY_TO_MODE")
+                .unwrap_or_else(|_| "first".to_string())
+                .to_lowercase(),
+            reactions_enabled: !is_env_false("DISCORD_REACTIONS"),
+            auto_thread: !is_env_false("DISCORD_AUTO_THREAD"),
+            require_mention: !is_env_false("DISCORD_REQUIRE_MENTION"),
+            allowed_users: parse_csv("DISCORD_ALLOWED_USERS"),
+            ignored_channels: parse_csv("DISCORD_IGNORED_CHANNELS"),
+            allowed_channels: parse_csv("DISCORD_ALLOWED_CHANNELS"),
+            no_thread_channels: parse_csv("DISCORD_NO_THREAD_CHANNELS"),
+            free_response_channels: parse_csv("DISCORD_FREE_RESPONSE_CHANNELS"),
         }
     }
 }
@@ -52,6 +101,15 @@ impl DiscordConfig {
         Self::default()
     }
 }
+
+fn is_env_false(name: &str) -> bool {
+    matches!(
+        std::env::var(name).unwrap_or_default().to_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
+// ── Data types ──────────────────────────────────────────────────────────────
 
 /// Parsed media attachment from an inbound Discord message.
 #[derive(Debug, Clone)]
@@ -87,9 +145,82 @@ pub struct DiscordMessageEvent {
     pub content: String,
     /// Whether this is a DM.
     pub is_dm: bool,
+    /// Whether this is a thread / forum post.
+    pub is_thread: bool,
     /// Attachments.
     pub attachments: Vec<DiscordAttachment>,
+    /// Parent channel ID (for threads).
+    pub parent_id: Option<String>,
+    /// Channel type (from payload).
+    pub channel_type: Option<u8>,
 }
+
+/// Parsed slash command interaction.
+#[derive(Debug, Clone)]
+pub struct DiscordInteractionEvent {
+    /// Interaction ID.
+    pub interaction_id: String,
+    /// Interaction token.
+    pub interaction_token: String,
+    /// Channel ID.
+    pub channel_id: String,
+    /// Guild ID (if in a server).
+    pub guild_id: Option<String>,
+    /// User ID.
+    pub user_id: String,
+    /// User display name.
+    pub user_name: String,
+    /// Synthetic command text (e.g. "/reset").
+    pub content: String,
+    /// Application ID.
+    pub application_id: String,
+}
+
+/// Safe allowed-mentions defaults for outbound messages.
+#[derive(Debug, Clone)]
+pub struct AllowedMentions {
+    pub everyone: bool,
+    pub roles: bool,
+    pub users: bool,
+    pub replied_user: bool,
+}
+
+impl Default for AllowedMentions {
+    fn default() -> Self {
+        Self {
+            everyone: is_env_true("DISCORD_ALLOW_MENTION_EVERYONE"),
+            roles: is_env_true("DISCORD_ALLOW_MENTION_ROLES"),
+            users: !is_env_false("DISCORD_ALLOW_MENTION_USERS"),
+            replied_user: !is_env_false("DISCORD_ALLOW_MENTION_REPLIED_USER"),
+        }
+    }
+}
+
+impl AllowedMentions {
+    fn to_json(&self) -> serde_json::Value {
+        let mut parse = Vec::new();
+        if self.users {
+            parse.push("users");
+        }
+        if self.replied_user {
+            parse.push("replied_user");
+        }
+        serde_json::json!({
+            "parse": parse,
+            "roles": self.roles,
+            "everyone": self.everyone,
+        })
+    }
+}
+
+fn is_env_true(name: &str) -> bool {
+    matches!(
+        std::env::var(name).unwrap_or_default().to_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+// ── Adapter ─────────────────────────────────────────────────────────────────
 
 /// Discord platform adapter.
 pub struct DiscordAdapter {
@@ -100,6 +231,14 @@ pub struct DiscordAdapter {
     seq: Arc<parking_lot::Mutex<Option<u64>>>,
     /// Session ID for gateway resume.
     session_id: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Bot user ID populated after READY.
+    bot_user_id: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Threads the bot has participated in.
+    threads: ThreadParticipationTracker,
+    /// Allowed mentions config.
+    allowed_mentions: AllowedMentions,
+    /// Pending text batches for rapid successive messages.
+    pending_batches: Arc<Mutex<HashMap<String, (DiscordMessageEvent, Instant, tokio::task::AbortHandle)>>>,
 }
 
 impl DiscordAdapter {
@@ -115,6 +254,10 @@ impl DiscordAdapter {
             dedup: MessageDeduplicator::with_params(300, 2000),
             seq: Arc::new(parking_lot::Mutex::new(None)),
             session_id: Arc::new(parking_lot::Mutex::new(None)),
+            bot_user_id: Arc::new(parking_lot::Mutex::new(None)),
+            threads: ThreadParticipationTracker::new("discord", 1000),
+            allowed_mentions: AllowedMentions::default(),
+            pending_batches: Arc::new(Mutex::new(HashMap::new())),
             config,
         }
     }
@@ -127,7 +270,7 @@ impl DiscordAdapter {
 
     /// Connect to Discord Gateway and process events.
     pub async fn run(
-        &self,
+        self: Arc<Self>,
         handler: Arc<Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
         running: Arc<AtomicBool>,
     ) {
@@ -136,7 +279,6 @@ impl DiscordAdapter {
             return;
         }
 
-        // Get gateway URL
         let gateway_url = match self.get_gateway_url().await {
             Ok(url) => url,
             Err(e) => {
@@ -152,7 +294,7 @@ impl DiscordAdapter {
                 break;
             }
 
-            match self
+            match Arc::clone(&self)
                 .gateway_loop(&gateway_url, handler.clone(), running.clone())
                 .await
             {
@@ -191,7 +333,7 @@ impl DiscordAdapter {
     }
 
     async fn gateway_loop(
-        &self,
+        self: Arc<Self>,
         gateway_url: &str,
         handler: Arc<Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
         running: Arc<AtomicBool>,
@@ -251,129 +393,128 @@ impl DiscordAdapter {
             .await
             .map_err(|e: WsError| format!("Identify send failed: {e}"))?;
 
-        // Main read loop with heartbeat
-        let mut last_heartbeat = Instant::now();
-        let heartbeat_duration = Duration::from_millis(heartbeat_interval);
+        let mut heartbeat = interval(Duration::from_millis(heartbeat_interval));
+        heartbeat.reset();
 
         while running.load(Ordering::SeqCst) {
-            // Check if we need to send heartbeat
-            if last_heartbeat.elapsed() >= heartbeat_duration {
-                let s = *self.seq.lock();
-                let heartbeat = serde_json::json!({"op": 1, "d": s});
-                write
-                    .send(WsMessage::Text(heartbeat.to_string().into()))
-                    .await
-                    .map_err(|e: WsError| format!("Heartbeat send failed: {e}"))?;
-                last_heartbeat = Instant::now();
-            }
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    let s = *self.seq.lock();
+                    let heartbeat = serde_json::json!({"op": 1, "d": s});
+                    write
+                        .send(WsMessage::Text(heartbeat.to_string().into()))
+                        .await
+                        .map_err(|e: WsError| format!("Heartbeat send failed: {e}"))?;
+                }
 
-            // Read with timeout
-            let msg = tokio::time::timeout(Duration::from_secs(1), read.next()).await;
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            let event: serde_json::Value = serde_json::from_str(&text)
+                                .map_err(|e| format!("Event parse error: {e}"))?;
 
-            match msg {
-                Ok(Some(Ok(WsMessage::Text(text)))) => {
-                    let event: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| format!("Event parse error: {e}"))?;
+                            if let Some(s) = event.get("s").and_then(|v| v.as_u64()) {
+                                *self.seq.lock() = Some(s);
+                            }
 
-                    if let Some(s) = event.get("s").and_then(|v| v.as_u64()) {
-                        *self.seq.lock() = Some(s);
-                    }
-
-                    let opcode = event.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
-                    match opcode {
-                        0 => {
-                            // Dispatch
-                            if let Some(t) = event.get("t").and_then(|v| v.as_str()) {
-                                match t {
-                                    "READY" => {
-                                        if let Some(d) = event.get("d") {
-                                            if let Some(session_id) =
-                                                d.get("session_id").and_then(|v| v.as_str())
-                                            {
-                                                *self.session_id.lock() =
-                                                    Some(session_id.to_string());
-                                                info!("Discord Gateway READY");
-                                            }
-                                        }
-                                    }
-                                    "MESSAGE_CREATE" => {
-                                        if let Some(d) = event.get("d") {
-                                            if let Some(msg_event) = self.parse_message(d).await {
-                                                let handler_guard = handler.lock().await;
-                                                let handler_ref = handler_guard.as_ref().cloned();
-                                                drop(handler_guard);
-
-                                                if let Some(h) = handler_ref {
-                                                    let chat_id = msg_event.channel_id.clone();
-                                                    let content = msg_event.content.clone();
-                                                    let platform = crate::config::Platform::Discord;
+                            let opcode = event.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
+                            match opcode {
+                                0 => {
+                                    // Dispatch
+                                    if let Some(t) = event.get("t").and_then(|v| v.as_str()) {
+                                        match t {
+                                            "READY" => {
+                                                if let Some(d) = event.get("d") {
+                                                    if let Some(session_id) =
+                                                        d.get("session_id").and_then(|v| v.as_str())
+                                                    {
+                                                        *self.session_id.lock() =
+                                                            Some(session_id.to_string());
+                                                        info!("Discord Gateway READY");
+                                                    }
+                                                    if let Some(user) = d.get("user") {
+                                                        if let Some(id) = user.get("id").and_then(|v| v.as_str()) {
+                                                            *self.bot_user_id.lock() = Some(id.to_string());
+                                                            debug!("Discord bot user id: {id}");
+                                                        }
+                                                    }
+                                                    // Register slash commands after ready
+                                                    let adapter = self.clone();
                                                     tokio::spawn(async move {
-                                                        match h
-                                                            .handle_message(platform, &chat_id, &content, None)
-                                                            .await
-                                                        {
-                                                            Ok(result) => {
-                                                                if !result.response.is_empty() {
-                                                                    // We'll need the adapter to send — this is a limitation of the current architecture.
-                                                                    // For now, log the response.
-                                                                    info!("Discord response: {}", result.response.chars().take(100).collect::<String>());
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                error!("Discord handler error: {e}");
-                                                            }
+                                                        sleep(Duration::from_secs(2)).await;
+                                                        if let Err(e) = adapter.register_slash_commands().await {
+                                                            warn!("Discord slash command registration failed: {e}");
                                                         }
                                                     });
                                                 }
                                             }
+                                            "MESSAGE_CREATE" => {
+                                                if let Some(d) = event.get("d") {
+                                                    if let Some(msg_event) = self.parse_message(d).await {
+                                                        let adapter = self.clone();
+                                                        let handler = handler.clone();
+                                                        tokio::spawn(async move {
+                                                            adapter.handle_message_event(handler, msg_event).await;
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            "INTERACTION_CREATE" => {
+                                                if let Some(d) = event.get("d") {
+                                                    if let Some(interaction) = self.parse_interaction(d) {
+                                                        let adapter = self.clone();
+                                                        let handler = handler.clone();
+                                                        tokio::spawn(async move {
+                                                            adapter.handle_interaction_event(handler, interaction).await;
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    _ => {}
                                 }
+                                1 => {
+                                    // Heartbeat request — send heartbeat immediately
+                                    let s = *self.seq.lock();
+                                    let heartbeat = serde_json::json!({"op": 1, "d": s});
+                                    write
+                                        .send(WsMessage::Text(heartbeat.to_string().into()))
+                                        .await
+                                        .map_err(|e: WsError| format!("Heartbeat ack failed: {e}"))?;
+                                }
+                                7 => {
+                                    // Reconnect
+                                    warn!("Discord Gateway requested reconnect");
+                                    return Err("Reconnect requested".to_string());
+                                }
+                                9 => {
+                                    // Invalid session
+                                    warn!("Discord Gateway invalid session");
+                                    return Err("Invalid session".to_string());
+                                }
+                                11 => {
+                                    // Heartbeat ACK
+                                    debug!("Discord heartbeat ACK");
+                                }
+                                _ => {}
                             }
                         }
-                        1 => {
-                            // Heartbeat request — send heartbeat immediately
-                            let s = *self.seq.lock();
-                            let heartbeat = serde_json::json!({"op": 1, "d": s});
-                            write
-                                .send(WsMessage::Text(heartbeat.to_string().into()))
-                                .await
-                                .map_err(|e: WsError| format!("Heartbeat ack failed: {e}"))?;
+                        Some(Ok(WsMessage::Close(_frame))) => {
+                            info!("Discord Gateway closed");
+                            return Ok(());
                         }
-                        7 => {
-                            // Reconnect
-                            warn!("Discord Gateway requested reconnect");
-                            return Err("Reconnect requested".to_string());
+                        Some(Ok(_)) => {
+                            // Ignore other message types
                         }
-                        9 => {
-                            // Invalid session
-                            warn!("Discord Gateway invalid session");
-                            return Err("Invalid session".to_string());
+                        Some(Err(e)) => {
+                            return Err(format!("WebSocket error: {e}"));
                         }
-                        11 => {
-                            // Heartbeat ACK
-                            debug!("Discord heartbeat ACK");
+                        None => {
+                            info!("Discord Gateway stream ended");
+                            return Ok(());
                         }
-                        _ => {}
                     }
-                }
-                Ok(Some(Ok(WsMessage::Close(_frame)))) => {
-                    info!("Discord Gateway closed");
-                    return Ok(());
-                }
-                Ok(Some(Ok(_))) => {
-                    // Ignore other message types (binary, ping, pong, frame)
-                }
-                Ok(Some(Err(e))) => {
-                    return Err(format!("WebSocket error: {e}"));
-                }
-                Ok(None) => {
-                    info!("Discord Gateway stream ended");
-                    return Ok(());
-                }
-                Err(_) => {
-                    // Timeout — check running flag and heartbeat
                 }
             }
         }
@@ -414,6 +555,19 @@ impl DiscordAdapter {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Determine if thread/forum post from channel type if present
+        let channel_type = msg
+            .get("channel")
+            .and_then(|c| c.get("type"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u8);
+        let is_thread = channel_type.map(|t| t == 11 || t == 12).unwrap_or(false);
+        let parent_id = msg
+            .get("channel")
+            .and_then(|c| c.get("parent_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         // Parse attachments
         let mut attachments = Vec::new();
@@ -458,6 +612,12 @@ impl DiscordAdapter {
             }
         }
 
+        // Strip bot mention from content
+        if let Some(bot_id) = self.bot_user_id.lock().as_ref() {
+            content = content.replace(&format!("<@{bot_id}>"), "").replace(&format!("<@!{bot_id}>"), "");
+            content = content.trim().to_string();
+        }
+
         // Deduplication
         let dedup_key = format!("{channel_id}:{message_id}");
         if self.dedup.is_duplicate(&dedup_key) {
@@ -473,7 +633,50 @@ impl DiscordAdapter {
             author_name,
             content,
             is_dm,
+            is_thread,
             attachments,
+            parent_id,
+            channel_type,
+        })
+    }
+
+    fn parse_interaction(&self, data: &serde_json::Value) -> Option<DiscordInteractionEvent> {
+        let interaction_type = data.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Only handle application commands (type 2)
+        if interaction_type != 2 {
+            return None;
+        }
+
+        let interaction_id = data.get("id").and_then(|v| v.as_str())?.to_string();
+        let interaction_token = data.get("token").and_then(|v| v.as_str())?.to_string();
+        let channel_id = data.get("channel_id").and_then(|v| v.as_str())?.to_string();
+        let guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(String::from);
+        let application_id = data.get("application_id").and_then(|v| v.as_str())?.to_string();
+
+        let user = data
+            .get("user")
+            .or_else(|| data.get("member").and_then(|m| m.get("user")))?;
+        let user_id = user.get("id").and_then(|v| v.as_str())?.to_string();
+        let user_name = user
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let cmd_data = data.get("data")?;
+        let name = cmd_data.get("name").and_then(|v| v.as_str())?.to_string();
+        let options = cmd_data.get("options");
+        let content = build_slash_text(&name, options);
+
+        Some(DiscordInteractionEvent {
+            interaction_id,
+            interaction_token,
+            channel_id,
+            guild_id,
+            user_id,
+            user_name,
+            content,
+            application_id,
         })
     }
 
@@ -499,17 +702,403 @@ impl DiscordAdapter {
         Ok(local_path.to_string_lossy().to_string())
     }
 
+    // ── Event handlers ──────────────────────────────────────────────────────
+
+    async fn handle_message_event(
+        self: Arc<Self>,
+        handler: Arc<Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
+        msg_event: DiscordMessageEvent,
+    ) {
+        let chat_id = msg_event.channel_id.clone();
+        let message_id = msg_event.message_id.clone();
+        let content = msg_event.content.clone();
+
+        // Channel allowlist / ignorelist checks (non-DM only)
+        if !msg_event.is_dm {
+            let channel_ids: HashSet<String> = [
+                Some(chat_id.clone()),
+                msg_event.parent_id.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            if !self.config.allowed_channels.is_empty() {
+                if channel_ids.is_disjoint(&self.config.allowed_channels) {
+                    debug!("Discord: ignoring message in non-allowed channel {chat_id}");
+                    return;
+                }
+            }
+            if !self.config.ignored_channels.is_disjoint(&channel_ids) {
+                debug!("Discord: ignoring message in ignored channel {chat_id}");
+                return;
+            }
+        }
+
+        // Require mention check (non-DM only)
+        if !msg_event.is_dm && self.config.require_mention {
+            let in_bot_thread = msg_event.is_thread && self.threads.contains(&chat_id);
+            let is_free = !self.config.free_response_channels.is_disjoint(&HashSet::from([chat_id.clone()]));
+            if !in_bot_thread && !is_free {
+                // Check if bot is mentioned
+                let bot_mentioned = self.bot_user_id.lock().as_ref().map_or(false, |bot_id| {
+                    content.contains(&format!("<@{bot_id}>"))
+                        || content.contains(&format!("<@!{bot_id}>"))
+                });
+                if !bot_mentioned {
+                    return;
+                }
+            }
+        }
+
+        // Auto-thread on mention in text channels
+        let effective_chat_id = if !msg_event.is_dm
+            && !msg_event.is_thread
+            && self.config.auto_thread
+            && !self.config.no_thread_channels.contains(&chat_id)
+            && !self.config.free_response_channels.contains(&chat_id)
+        {
+            match self.try_auto_thread(&msg_event).await {
+                Some(thread_id) => {
+                    self.threads.mark(&thread_id);
+                    thread_id
+                }
+                None => chat_id.clone(),
+            }
+        } else {
+            chat_id.clone()
+        };
+
+        // Track thread participation
+        if msg_event.is_thread {
+            self.threads.mark(&chat_id);
+        }
+
+        // Add processing reaction
+        if self.config.reactions_enabled {
+            let _ = self.add_reaction(&chat_id, &message_id, "👀").await;
+        }
+
+        let handler_guard = handler.lock().await;
+        let handler_ref = handler_guard.as_ref().cloned();
+        drop(handler_guard);
+
+        if let Some(h) = handler_ref {
+            match h
+                .handle_message(
+                    crate::config::Platform::Discord,
+                    &effective_chat_id,
+                    &content,
+                    None,
+                )
+                .await
+            {
+                Ok(result) => {
+                    if self.config.reactions_enabled {
+                        let _ = self.remove_reaction(&chat_id, &message_id, "👀").await;
+                        let _ = self.add_reaction(&chat_id, &message_id, "✅").await;
+                    }
+                    if !result.response.is_empty() {
+                        if let Err(e) = self.send_text(&effective_chat_id, &result.response).await {
+                            error!("Discord send failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    if self.config.reactions_enabled {
+                        let _ = self.remove_reaction(&chat_id, &message_id, "👀").await;
+                        let _ = self.add_reaction(&chat_id, &message_id, "❌").await;
+                    }
+                    error!("Discord handler error: {e}");
+                }
+            }
+        }
+    }
+
+    async fn handle_interaction_event(
+        self: Arc<Self>,
+        handler: Arc<Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
+        interaction: DiscordInteractionEvent,
+    ) {
+        // Acknowledge the interaction immediately (deferred)
+        if let Err(e) = self
+            .acknowledge_interaction(&interaction.interaction_id, &interaction.interaction_token)
+            .await
+        {
+            warn!("Failed to acknowledge Discord interaction: {e}");
+        }
+
+        let handler_guard = handler.lock().await;
+        let handler_ref = handler_guard.as_ref().cloned();
+        drop(handler_guard);
+
+        if let Some(h) = handler_ref {
+            match h
+                .handle_message(
+                    crate::config::Platform::Discord,
+                    &interaction.channel_id,
+                    &interaction.content,
+                    None,
+                )
+                .await
+            {
+                Ok(result) => {
+                    if !result.response.is_empty() {
+                        // Send followup to replace the deferred message
+                        let _ = self
+                            .send_interaction_followup(
+                                &interaction.application_id,
+                                &interaction.interaction_token,
+                                &result.response,
+                            )
+                            .await;
+                    } else {
+                        // Delete the deferred message if no response
+                        let _ = self
+                            .delete_interaction_response(
+                                &interaction.application_id,
+                                &interaction.interaction_token,
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    error!("Discord slash handler error: {e}");
+                    let _ = self
+                        .send_interaction_followup(
+                            &interaction.application_id,
+                            &interaction.interaction_token,
+                            &format!("Error: {e}"),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    // ── Slash commands ──────────────────────────────────────────────────────
+
+    async fn register_slash_commands(&self) -> Result<(), String> {
+        let app_id = match self.config.application_id.as_ref() {
+            Some(id) => id,
+            None => {
+                debug!("Discord application_id not set, skipping slash command registration");
+                return Ok(());
+            }
+        };
+
+        let url = format!("{API_BASE}/applications/{app_id}/commands");
+
+        let commands = serde_json::json!([
+            { "name": "new", "description": "Start a new conversation", "type": 1 },
+            { "name": "reset", "description": "Reset your Hermes session", "type": 1 },
+            { "name": "status", "description": "Show Hermes session status", "type": 1 },
+            { "name": "stop", "description": "Stop the running Hermes agent", "type": 1 },
+            { "name": "model", "description": "Show or change the model", "type": 1, "options": [
+                { "name": "name", "description": "Model name", "type": 3, "required": false }
+            ]},
+            { "name": "retry", "description": "Retry your last message", "type": 1 },
+            { "name": "undo", "description": "Remove the last exchange", "type": 1 },
+            { "name": "compress", "description": "Compress conversation context", "type": 1 },
+            { "name": "title", "description": "Set or show the session title", "type": 1, "options": [
+                { "name": "name", "description": "Session title", "type": 3, "required": false }
+            ]},
+            { "name": "resume", "description": "Resume a previously-named session", "type": 1, "options": [
+                { "name": "name", "description": "Session name", "type": 3, "required": false }
+            ]},
+            { "name": "usage", "description": "Show token usage for this session", "type": 1 },
+            { "name": "help", "description": "Show available commands", "type": 1 },
+            { "name": "approve", "description": "Approve a pending dangerous command", "type": 1, "options": [
+                { "name": "scope", "description": "Optional scope", "type": 3, "required": false }
+            ]},
+            { "name": "deny", "description": "Deny a pending dangerous command", "type": 1, "options": [
+                { "name": "scope", "description": "Optional scope", "type": 3, "required": false }
+            ]},
+            { "name": "voice", "description": "Toggle voice reply mode", "type": 1, "options": [
+                { "name": "mode", "description": "Voice mode: on, off, tts, channel, leave, or status", "type": 3, "required": false }
+            ]},
+        ]);
+
+        let resp = self
+            .client
+            .put(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&commands)
+            .send()
+            .await
+            .map_err(|e| format!("slash command register request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord slash command register error {status}: {body}"));
+        }
+
+        info!("Discord slash commands registered");
+        Ok(())
+    }
+
+    async fn acknowledge_interaction(&self, interaction_id: &str, token: &str) -> Result<(), String> {
+        let url = format!("{API_BASE}/interactions/{interaction_id}/{token}/callback");
+        let body = serde_json::json!({ "type": 5 }); // deferred channel message with source
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("interaction ack failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("interaction ack error {status}: {body}"));
+        }
+        Ok(())
+    }
+
+    async fn send_interaction_followup(
+        &self,
+        app_id: &str,
+        token: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        let url = format!("{API_BASE}/webhooks/{app_id}/{token}");
+        let chunks = split_discord_message(content);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let body = serde_json::json!({
+                "content": chunk,
+                "allowed_mentions": self.allowed_mentions.to_json(),
+            });
+            if i == chunks.len() - 1 {
+                // nothing special
+            }
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("interaction followup failed: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let err_body = resp.text().await.unwrap_or_default();
+                return Err(format!("interaction followup error {status}: {err_body}"));
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_interaction_response(&self, app_id: &str, token: &str) -> Result<(), String> {
+        let url = format!("{API_BASE}/webhooks/{app_id}/{token}/messages/@original");
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| format!("interaction delete failed: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(format!("interaction delete error {status}: {err_body}"));
+        }
+        Ok(())
+    }
+
+    // ── Reactions ───────────────────────────────────────────────────────────
+
+    /// Add an emoji reaction to a Discord message.
+    pub async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<(), String> {
+        let encoded_emoji = urlencode(emoji);
+        let url = format!("{API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded_emoji}/@me");
+        let resp = self
+            .client
+            .put(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| format!("add_reaction failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("add_reaction error {status}: {body}"));
+        }
+        Ok(())
+    }
+
+    /// Remove the bot's own emoji reaction from a Discord message.
+    pub async fn remove_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<(), String> {
+        let encoded_emoji = urlencode(emoji);
+        let url = format!("{API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded_emoji}/@me");
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| format!("remove_reaction failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("remove_reaction error {status}: {body}"));
+        }
+        Ok(())
+    }
+
     // ── Outbound sending ────────────────────────────────────────────────────
 
-    /// Send a text message to a Discord channel.
+    /// Send a text message to a Discord channel, with forum and reply support.
     pub async fn send_text(&self, channel_id: &str, text: &str) -> Result<(), String> {
         if self.config.bot_token.is_empty() {
             return Err("Discord bot_token not configured".to_string());
         }
 
+        // Check if target is a forum channel
+        if let Ok(true) = self.is_forum_channel(channel_id).await {
+            return self.send_to_forum(channel_id, text).await;
+        }
+
         let chunks = split_discord_message(text);
         for chunk in chunks {
-            self.send_message(channel_id, &chunk, None).await?;
+            self.send_message(channel_id, &chunk, None, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Send a text message with a reply reference.
+    pub async fn send_text_reply(
+        &self,
+        channel_id: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        if let Ok(true) = self.is_forum_channel(channel_id).await {
+            return self.send_to_forum(channel_id, text).await;
+        }
+
+        let chunks = split_discord_message(text);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let reference = match self.config.reply_to_mode.as_str() {
+                "off" => None,
+                "all" => reply_to.map(|id| serde_json::json!({ "message_id": id })),
+                _ => {
+                    // "first" (default) — reply on first chunk only
+                    if i == 0 {
+                        reply_to.map(|id| serde_json::json!({ "message_id": id }))
+                    } else {
+                        None
+                    }
+                }
+            };
+            self.send_message(channel_id, chunk, None, reference).await?;
         }
         Ok(())
     }
@@ -526,7 +1115,54 @@ impl DiscordAdapter {
             "description": description.chars().take(4096).collect::<String>(),
             "color": 0x3498db,
         });
-        self.send_message(channel_id, "", Some(embed)).await
+        self.send_message(channel_id, "", Some(embed), None).await
+    }
+
+    /// Send a file attachment to a channel.
+    pub async fn send_file(
+        &self,
+        channel_id: &str,
+        file_path: &std::path::Path,
+        file_name: Option<&str>,
+        caption: Option<&str>,
+    ) -> Result<(), String> {
+        let name = file_name.unwrap_or_else(|| {
+            file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        });
+
+        let file_content = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| format!("read file failed: {e}"))?;
+
+        let part = multipart::Part::bytes(file_content)
+            .file_name(name.to_string());
+
+        let form = multipart::Form::new()
+            .part("file", part);
+
+        // Build payload_json with allowed_mentions
+        let payload = serde_json::json!({
+            "content": caption.unwrap_or(""),
+            "allowed_mentions": self.allowed_mentions.to_json(),
+        });
+        let form = form.text("payload_json", payload.to_string());
+
+        let url = format!("{API_BASE}/channels/{channel_id}/messages");
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("send file request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord API error {status}: {err_body}"));
+        }
+        Ok(())
     }
 
     async fn send_message(
@@ -534,13 +1170,18 @@ impl DiscordAdapter {
         channel_id: &str,
         content: &str,
         embed: Option<serde_json::Value>,
+        message_reference: Option<serde_json::Value>,
     ) -> Result<(), String> {
         let url = format!("{API_BASE}/channels/{channel_id}/messages");
         let mut body = serde_json::json!({
             "content": content,
+            "allowed_mentions": self.allowed_mentions.to_json(),
         });
         if let Some(e) = embed {
             body["embeds"] = serde_json::Value::Array(vec![e]);
+        }
+        if let Some(r) = message_reference {
+            body["message_reference"] = r;
         }
 
         let resp = self
@@ -555,10 +1196,7 @@ impl DiscordAdapter {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let err_body: serde_json::Value = resp
-                .json()
-                .await
-                .unwrap_or_default();
+            let err_body: serde_json::Value = resp.json().await.unwrap_or_default();
             let msg = err_body
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -567,6 +1205,151 @@ impl DiscordAdapter {
         }
 
         Ok(())
+    }
+
+    // ── Forum channel support ───────────────────────────────────────────────
+
+    async fn is_forum_channel(&self, channel_id: &str) -> Result<bool, String> {
+        let url = format!("{API_BASE}/channels/{channel_id}");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| format!("channel fetch failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Ok(false);
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("channel parse error: {e}"))?;
+
+        let channel_type = body.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        Ok(channel_type == CHANNEL_TYPE_GUILD_FORUM)
+    }
+
+    async fn send_to_forum(&self, forum_channel_id: &str, content: &str) -> Result<(), String> {
+        let thread_name = derive_forum_thread_name(content);
+        let chunks = split_discord_message(content);
+        let starter = chunks.first().map(String::as_str).unwrap_or(&thread_name);
+
+        let url = format!("{API_BASE}/channels/{forum_channel_id}/threads");
+        let body = serde_json::json!({
+            "name": thread_name,
+            "message": {
+                "content": starter,
+                "allowed_mentions": self.allowed_mentions.to_json(),
+            },
+            "auto_archive_duration": 1440,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("forum thread create failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(format!("forum thread create error {status}: {err_body}"));
+        }
+
+        let thread_data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("forum thread parse error: {e}"))?;
+
+        let thread_id = thread_data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(forum_channel_id);
+
+        // Send remaining chunks into the new thread
+        for chunk in chunks.iter().skip(1) {
+            if let Err(e) = self.send_message(thread_id, chunk, None, None).await {
+                warn!("Failed to send follow-up chunk to forum thread {thread_id}: {e}");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn try_auto_thread(&self, msg_event: &DiscordMessageEvent) -> Option<String> {
+        let thread_name = {
+            let mut text = msg_event.content.clone();
+            // Strip mention syntax for cleaner titles
+            let re = regex::Regex::new(r"<@[!&]?\d+>").ok()?;
+            text = re.replace_all(&text, "").to_string();
+            let re2 = regex::Regex::new(r"<#\d+>").ok()?;
+            text = re2.replace_all(&text, "").to_string();
+            text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                "Hermes".to_string()
+            } else if text.chars().count() > 80 {
+                text.chars().take(77).collect::<String>() + "..."
+            } else {
+                text
+            }
+        };
+
+        // Try creating a thread from the message
+        let url = format!(
+            "{API_BASE}/channels/{}/messages/{}/threads",
+            msg_event.channel_id, msg_event.message_id
+        );
+        let body = serde_json::json!({
+            "name": thread_name,
+            "auto_archive_duration": 1440,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.ok()?;
+                data.get("id").and_then(|v| v.as_str()).map(String::from)
+            }
+            _ => {
+                // Fallback: create thread in channel directly
+                let url = format!("{API_BASE}/channels/{}/threads", msg_event.channel_id);
+                let body = serde_json::json!({
+                    "name": thread_name,
+                    "type": 11,
+                    "auto_archive_duration": 1440,
+                });
+                let resp = self
+                    .client
+                    .post(&url)
+                    .header("Authorization", self.auth_header())
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        let data: serde_json::Value = r.json().await.ok()?;
+                        data.get("id").and_then(|v| v.as_str()).map(String::from)
+                    }
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Send typing indicator to a channel.
@@ -588,6 +1371,49 @@ impl DiscordAdapter {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// URL-encode an emoji string for Discord API paths.
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
+}
+
+/// Build synthetic command text from slash command name + options.
+fn build_slash_text(name: &str, options: Option<&serde_json::Value>) -> String {
+    let mut parts = vec![format!("/{name}")];
+    if let Some(opts) = options.and_then(|v| v.as_array()) {
+        for opt in opts {
+            if let Some(val) = opt.get("value").and_then(|v| v.as_str()) {
+                parts.push(val.to_string());
+            } else if let Some(val) = opt.get("value").and_then(|v| v.as_i64()) {
+                parts.push(val.to_string());
+            } else if let Some(val) = opt.get("value").and_then(|v| v.as_f64()) {
+                parts.push(val.to_string());
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+/// Derive a short forum thread name from message content.
+fn derive_forum_thread_name(content: &str) -> String {
+    let text = content.lines().next().unwrap_or(content).trim();
+    let text: String = text
+        .chars()
+        .take(80)
+        .collect();
+    if text.is_empty() {
+        "New Post".to_string()
+    } else if text.chars().count() > 80 {
+        text.chars().take(77).collect::<String>() + "..."
+    } else {
+        text.to_string()
+    }
+}
 
 /// Split a long message into chunks that fit within Discord's 2000 character limit.
 fn split_discord_message(text: &str) -> Vec<String> {
@@ -666,5 +1492,24 @@ mod tests {
     fn test_discord_config_from_env() {
         let cfg = DiscordConfig::default();
         assert_eq!(cfg.bot_token, std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default());
+    }
+
+    #[test]
+    fn test_build_slash_text() {
+        assert_eq!(build_slash_text("reset", None), "/reset");
+        let opts = serde_json::json!([{"name": "name", "value": "claude"}]);
+        assert_eq!(build_slash_text("model", Some(&opts)), "/model claude");
+    }
+
+    #[test]
+    fn test_derive_forum_thread_name() {
+        assert_eq!(derive_forum_thread_name("Hello world\nMore text"), "Hello world");
+        assert_eq!(derive_forum_thread_name(""), "New Post");
+    }
+
+    #[test]
+    fn test_urlencode() {
+        assert_eq!(urlencode("👀"), "%F0%9F%91%80");
+        assert_eq!(urlencode("✅"), "%E2%9C%85");
     }
 }
