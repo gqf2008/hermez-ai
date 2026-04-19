@@ -1,0 +1,31 @@
+[package]
+name = "hermes-agent-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hermes-core.workspace = true
+anyhow.workspace = true
+hermes-llm.workspace = true
+hermes-tools.workspace = true
+hermes-prompt.workspace = true
+hermes-state.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+chrono.workspace = true
+walkdir.workspace = true
+serde_yaml.workspace = true
+shellexpand.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+mockito.workspace = true

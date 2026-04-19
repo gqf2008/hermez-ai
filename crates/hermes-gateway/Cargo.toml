@@ -1,0 +1,48 @@
+[package]
+name = "hermes-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hermes-core.workspace = true
+hermes-state.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex = "0.4"
+parking_lot.workspace = true
+regex.workspace = true
+futures = "0.3"
+async-stream = "0.3"
+base64.workspace = true
+
+# API Server adapter
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "limit", "set-header"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# WeCom WebSocket adapter
+tokio-tungstenite = "0.26"
+
+# Weixin AES-128-ECB media decryption
+aes = "0.8"
+cbc = { version = "0.1.2", features = ["alloc"] }
+md5 = "0.8.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+serial_test = "3"

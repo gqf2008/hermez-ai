@@ -1,0 +1,19 @@
+[package]
+name = "hermes-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hermes-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rand = "0.9"
+regex.workspace = true
+tempfile.workspace = true
+once_cell.workspace = true
+chrono.workspace = true

@@ -1,0 +1,55 @@
+[package]
+name = "hermes-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["docker", "mcp", "browser", "image"]
+docker = []
+mcp = []
+image = []
+browser = []
+
+[dependencies]
+hermes-core.workspace = true
+hermes-llm.workspace = true
+hermes-state.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+fuzzy-matcher.workspace = true
+similar.workspace = true
+tempfile.workspace = true
+glob.workspace = true
+walkdir.workspace = true
+parking_lot.workspace = true
+pathdiff.workspace = true
+once_cell.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+shellexpand.workspace = true
+url.workspace = true
+ipnet = "2"
+serde_yaml.workspace = true
+sha2.workspace = true
+md5 = "0.7"
+dirs.workspace = true
+base64 = "0.22.1"
+bollard.workspace = true
+futures-util = "0.3"
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+unicode-normalization = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_yaml.workspace = true
+serial_test = "3"
