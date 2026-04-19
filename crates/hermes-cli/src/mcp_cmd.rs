@@ -289,35 +289,18 @@ pub fn cmd_mcp(
 }
 
 /// Run as MCP stdio server.
-pub fn cmd_mcp_serve(_verbose: bool) -> anyhow::Result<()> {
-    println!();
-    println!("{}", cyan().apply_to("◆ MCP Stdio Server"));
-    println!();
-    println!("  {}", dim().apply_to("Starting MCP server over stdio..."));
-    println!("  {}", dim().apply_to("This allows IDEs and other clients to connect via stdio transport."));
-    println!();
-
-    // List enabled servers
-    let servers = load_mcp_servers();
-    let enabled: Vec<_> = servers.iter().filter(|s| s.enabled).collect();
-
-    if enabled.is_empty() {
-        println!("  {}", yellow().apply_to("⚠ No MCP servers enabled."));
-        println!("  {}", dim().apply_to("Run `hermes mcp add <name> --command <cmd>` first."));
-    } else {
-        println!("  Enabled servers:");
-        for server in &enabled {
-            let location = match (&server.url, &server.command) {
-                (Some(u), _) => format!("url: {u}"),
-                (_, Some(c)) => format!("{c} {}", server.args.join(" ")),
-                (None, None) => "(none)".to_string(),
-            };
-            println!("    - {} ({})", server.name, location);
-        }
+pub fn cmd_mcp_serve(verbose: bool) -> anyhow::Result<()> {
+    if !verbose {
+        println!();
+        println!("{}", cyan().apply_to("◆ MCP Stdio Server"));
+        println!();
+        println!("  {}", dim().apply_to("Starting Hermes MCP server over stdio..."));
+        println!();
     }
-    println!();
 
-    Ok(())
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(hermes_tools::mcp_serve::run_mcp_server(verbose))
+        .map_err(|e| anyhow::anyhow!("MCP server failed: {e}"))
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 //! 4. **Direct CDP** — user-supplied CDP endpoint
 
 pub mod camofox;
+pub mod camofox_state;
 pub mod providers;
 pub mod resolver;
 pub mod security;
@@ -29,6 +30,20 @@ static SESSION_MANAGER: std::sync::LazyLock<Arc<BrowserSessionManager>> =
 /// Resolve the browser backend (cached per process).
 static RESOLVED_BACKEND: std::sync::LazyLock<BrowserBackend> =
     std::sync::LazyLock::new(|| resolver::resolve_backend(None));
+
+/// Check if Camofox mode is active.
+fn _is_camofox_mode() -> bool {
+    matches!(&*RESOLVED_BACKEND, BrowserBackend::Camofox)
+}
+
+/// Get the active cloud provider, if any.
+fn get_cloud_provider() -> Option<Arc<dyn providers::CloudBrowserProvider>> {
+    if let BrowserBackend::Cloud(provider) = &*RESOLVED_BACKEND {
+        Some(provider.clone())
+    } else {
+        None
+    }
+}
 
 /// Max characters for snapshot content before summarization.
 const SNAPSHOT_SUMMARIZE_THRESHOLD: usize = 8000;
@@ -333,13 +348,13 @@ fn browser_navigate(args: &Value) -> Result<String, hermes_core::HermesError> {
     }
 
     // Camofox backend
-    if matches!(&*RESOLVED_BACKEND, BrowserBackend::Camofox) {
+    if _is_camofox_mode() {
         return browser_navigate_camofox(&url, &task_id);
     }
 
     // Cloud backend: create session if needed
-    if let BrowserBackend::Cloud(provider) = &*RESOLVED_BACKEND {
-        return browser_navigate_cloud(&url, &task_id, provider);
+    if let Some(provider) = get_cloud_provider() {
+        return browser_navigate_cloud(&url, &task_id, &provider);
     }
 
     // Direct CDP or Local: use agent-browser CLI
@@ -423,9 +438,19 @@ fn browser_navigate(args: &Value) -> Result<String, hermes_core::HermesError> {
 /// Camofox navigate: create tab + navigate.
 async fn camofox_navigate_async(url: String, task_id: String) -> Result<String, String> {
     let client = camofox::CamofoxClient::from_env();
-    let user_id = camofox::derive_user_id(None);
-    let tab_id = client.create_tab(&user_id).await?;
-    let result = client.navigate(&tab_id, &url, &user_id).await?;
+    let entry = camofox::get_session_entry(Some(&task_id)).await;
+
+    let (user_id, tab_id) = if entry.tab_id.is_none() {
+        let entry = camofox::ensure_tab(&client, Some(&task_id), &url).await?;
+        let uid = entry.user_id.clone();
+        let tid = entry.tab_id.clone().ok_or("Failed to create tab")?;
+        (uid, tid)
+    } else {
+        let uid = entry.user_id.clone();
+        let tid = entry.tab_id.clone().unwrap();
+        let _ = client.navigate(&tid, &url, &uid).await?;
+        (uid, tid)
+    };
 
     SESSION_MANAGER.register_camofox(&task_id, &user_id, &tab_id);
 
@@ -433,7 +458,6 @@ async fn camofox_navigate_async(url: String, task_id: String) -> Result<String, 
         "success": true,
         "action": "navigate",
         "url": url,
-        "result": result.trim(),
     });
 
     Ok(response.to_string())
@@ -504,7 +528,7 @@ fn browser_snapshot(args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox snapshot
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_snapshot_camofox(&task_id, full, user_task);
     }
 
@@ -605,7 +629,7 @@ fn browser_click(args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox click
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_click_camofox(&ref_id, &task_id);
     }
 
@@ -666,7 +690,7 @@ fn browser_type(args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox type
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_type_camofox(&ref_id, &text, &task_id);
     }
 
@@ -723,7 +747,7 @@ fn browser_scroll(args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox scroll
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_scroll_camofox(direction, &task_id);
     }
 
@@ -775,7 +799,7 @@ fn browser_back(_args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox back
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_back_camofox(&task_id);
     }
 
@@ -829,7 +853,7 @@ fn browser_press(args: &Value) -> Result<String, hermes_core::HermesError> {
     SESSION_MANAGER.update_activity(&task_id);
 
     // Camofox press
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
+    if _is_camofox_mode() {
         return browser_press_camofox(&key, &task_id);
     }
 
@@ -877,6 +901,14 @@ fn browser_press_camofox(key: &str, task_id: &str) -> Result<String, hermes_core
 }
 
 fn browser_get_images(_args: &Value) -> Result<String, hermes_core::HermesError> {
+    let task_id = get_task_id(_args);
+    SESSION_MANAGER.update_activity(&task_id);
+
+    // Camofox get_images
+    if _is_camofox_mode() {
+        return browser_get_images_camofox(&task_id);
+    }
+
     match run_agent_browser(&["eval", "Array.from(document.querySelectorAll('img')).map(i => ({src: i.src, alt: i.alt, width: i.width, height: i.height}))"]) {
         Ok((stdout, stderr, success)) => {
             if success {
@@ -904,15 +936,17 @@ fn browser_vision(args: &Value) -> Result<String, hermes_core::HermesError> {
         None => return Ok(tool_error("browser_vision requires a 'question' parameter.")),
     };
 
+    let task_id = get_task_id(args);
+
     let temp_dir = std::env::temp_dir().join(format!(
         "hermes_browser_{}.png",
         std::process::id()
     ));
     let temp_path = temp_dir.to_string_lossy().to_string();
 
-    // Camofox vision: screenshot via REST API
-    if let BrowserBackend::Camofox = &*RESOLVED_BACKEND {
-        return browser_vision_camofox(&question, &temp_path);
+    // Camofox vision: screenshot via REST API + LLM analysis
+    if _is_camofox_mode() {
+        return browser_vision_camofox(&question, &task_id);
     }
 
     match run_agent_browser(&["screenshot", &temp_path]) {
@@ -949,29 +983,53 @@ async fn camofox_vision_async(question: String, task_id: String) -> Result<Strin
     let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
     let tab_id = info.camofox_tab_id.ok_or("Missing tab_id")?;
 
-    let screenshot = client.screenshot(&tab_id, &user_id).await?;
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &screenshot);
+    let result = camofox::camofox_vision(&client, &tab_id, &user_id, &question, false).await?;
+    Ok(result.to_string())
+}
+
+fn browser_vision_camofox(question: &str, _task_id: &str) -> Result<String, hermes_core::HermesError> {
+    let question = question.to_string();
+    let task_id = _task_id.to_string();
+    block_on_browser(camofox_vision_async(question, task_id))
+}
+
+// --- Camofox get_images ---
+
+async fn camofox_get_images_async(task_id: String) -> Result<String, String> {
+    let client = camofox::CamofoxClient::from_env();
+    let info = SESSION_MANAGER
+        .get_session(&task_id)
+        .ok_or_else(|| "No active Camofox session. Navigate to a URL first.".to_string())?;
+
+    let user_id = info.camofox_user_id.ok_or("Missing user_id")?;
+    let tab_id = info.camofox_tab_id.ok_or("Missing tab_id")?;
+
+    let images = camofox::camofox_get_images(&client, &tab_id, &user_id).await?;
+    let count = images.len();
 
     Ok(serde_json::json!({
         "success": true,
-        "action": "vision",
-        "question": question,
-        "screenshot": encoded,
-        "note": "Screenshot captured via Camofox. Use a vision model to analyze the image.",
+        "action": "get_images",
+        "images": images,
+        "count": count,
     })
     .to_string())
 }
 
-fn browser_vision_camofox(question: &str, _temp_path: &str) -> Result<String, hermes_core::HermesError> {
-    let question = question.to_string();
-    let task_id = get_task_id(&serde_json::json!({}));
-    block_on_browser(camofox_vision_async(question, task_id))
+fn browser_get_images_camofox(task_id: &str) -> Result<String, hermes_core::HermesError> {
+    let task_id = task_id.to_string();
+    block_on_browser(camofox_get_images_async(task_id))
 }
 
 fn browser_console(args: &Value) -> Result<String, hermes_core::HermesError> {
     let expression = args.get("expression").and_then(Value::as_str);
     let task_id = get_task_id(args);
     SESSION_MANAGER.update_activity(&task_id);
+
+    // Camofox console
+    if _is_camofox_mode() {
+        return Ok(camofox::camofox_console().to_string());
+    }
 
     if let Some(expr) = expression {
         match run_agent_browser(&["eval", expr]) {

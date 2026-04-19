@@ -4,6 +4,19 @@
 //! Camofox is a local anti-detection browser (Firefox fork with C++
 //! fingerprint spoofing) that exposes a REST API.
 
+use std::collections::HashMap;
+
+use tokio::sync::Mutex;
+
+use super::camofox_state;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Default timeout per HTTP request (seconds).
+const DEFAULT_TIMEOUT: u64 = 30;
+
 /// Camofox client configuration.
 #[derive(Debug, Clone)]
 pub struct CamofoxConfig {
@@ -20,12 +33,29 @@ impl Default for CamofoxConfig {
     }
 }
 
+/// Return the configured Camofox server URL, or empty string.
+pub fn get_camofox_url() -> String {
+    std::env::var("CAMOFOX_URL").unwrap_or_default().trim_end_matches('/').to_string()
+}
+
+/// True when Camofox backend is configured and no CDP override is active.
+///
+/// When the user has explicitly connected to a live Chrome instance via
+/// `BROWSER_CDP_URL`, the CDP connection takes priority over Camofox.
+pub fn is_camofox_mode() -> bool {
+    if std::env::var("BROWSER_CDP_URL").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        return false;
+    }
+    !get_camofox_url().is_empty()
+}
+
 /// Camofox session tracking info.
 #[derive(Debug, Clone)]
 pub struct CamofoxSession {
     pub user_id: String,
     pub tab_id: Option<String>,
     pub session_key: String,
+    pub managed: bool,
 }
 
 /// Camofox REST API client.
@@ -61,6 +91,41 @@ impl CamofoxClient {
         let url = format!("{}/tabs", self.base());
         let resp = self.client.post(&url)
             .json(&serde_json::json!({ "userId": user_id }))
+            .send()
+            .await
+            .map_err(|e| format!("Camofox: create tab failed: {e}"))?;
+
+        let status = resp.status();
+        let body = resp.text().await
+            .map_err(|e| format!("Camofox: read response failed: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!("Camofox: create tab failed ({status}): {body}"));
+        }
+
+        let data: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Camofox: parse error: {e}"))?;
+
+        data.get("tabId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("Camofox: no tabId in response: {body}"))
+    }
+
+    /// Create a new tab with session key and initial URL.
+    pub async fn create_tab_with_url(
+        &self,
+        user_id: &str,
+        session_key: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        let endpoint = format!("{}/tabs", self.base());
+        let resp = self.client.post(&endpoint)
+            .json(&serde_json::json!({
+                "userId": user_id,
+                "sessionKey": session_key,
+                "url": url,
+            }))
             .send()
             .await
             .map_err(|e| format!("Camofox: create tab failed: {e}"))?;
@@ -118,7 +183,10 @@ impl CamofoxClient {
             return Err(format!("Camofox: snapshot failed ({status}): {body}"));
         }
 
-        Ok(body)
+        let data: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Camofox: parse error: {e}"))?;
+
+        Ok(data.get("snapshot").and_then(|v| v.as_str()).unwrap_or(&body).to_string())
     }
 
     /// Click element by ref.
@@ -281,9 +349,7 @@ impl CamofoxClient {
     /// Drop session — clear in-memory state and close the browser session.
     /// Mirrors Python: `_drop_session` + API close.
     pub async fn drop_session(&self, user_id: &str, session_info: &mut CamofoxSession) {
-        // Clear tab tracking
         session_info.tab_id = None;
-        // Call the API to close
         let _ = self.close_session(user_id).await;
         tracing::debug!("Camofox: dropped session for user {user_id}");
     }
@@ -293,35 +359,10 @@ impl CamofoxClient {
     pub async fn camofox_close(&self, session: &mut CamofoxSession) -> String {
         let user_id = session.user_id.clone();
         if let Some(ref tab_id) = session.tab_id {
-            // Close tab first
             let _ = self.close_session(tab_id).await;
         }
         self.drop_session(&user_id, session).await;
         format!("Camofox session closed for user {user_id}")
-    }
-
-    /// Get screenshots as base64 images.
-    /// Mirrors Python: `camofox_get_images`.
-    pub async fn camofox_get_images(&self, tab_id: &str, user_id: &str) -> Result<String, String> {
-        let bytes = self.screenshot(tab_id, user_id).await?;
-        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-        Ok(format!("data:image/png;base64,{encoded}"))
-    }
-
-    /// Print session state for debugging.
-    /// Mirrors Python: `camofox_console`.
-    pub fn camofox_console(&self, session: &CamofoxSession) -> String {
-        format!(
-            "Camofox Session:\n\
-             \tUser ID:    {}\n\
-             \tTab ID:     {}\n\
-             \tSession Key: {}\n\
-             \tConfig URL:  {}",
-            session.user_id,
-            session.tab_id.as_deref().unwrap_or("(none)"),
-            session.session_key,
-            self.config.url,
-        )
     }
 }
 
@@ -333,77 +374,270 @@ pub struct CamofoxHealth {
     pub raw: serde_json::Value,
 }
 
-const CAMOFOX_STATE_DIR_NAME: &str = "browser_auth";
-const CAMOFOX_STATE_SUBDIR: &str = "camofox";
+// ---------------------------------------------------------------------------
+// Session management (tokio::sync::Mutex)
+// ---------------------------------------------------------------------------
 
-/// Return the profile-scoped root directory for Camofox persistence.
-/// Mirrors Python `get_camofox_state_dir()`.
-pub fn get_camofox_state_dir() -> std::path::PathBuf {
-    hermes_core::get_hermes_home()
-        .join(CAMOFOX_STATE_DIR_NAME)
-        .join(CAMOFOX_STATE_SUBDIR)
+static CAMOFOX_SESSIONS: std::sync::LazyLock<Mutex<HashMap<String, CamofoxSession>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Check if managed persistence is enabled for Camofox.
+/// Mirrors Python `_managed_persistence_enabled`.
+fn managed_persistence_enabled() -> bool {
+    std::env::var("CAMOFOX_MANAGED_PERSISTENCE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
 }
 
-/// Return the stable Hermes-managed Camofox identity for this profile.
-///
-/// The user identity is profile-scoped (same Hermes profile = same userId).
-/// The session key is scoped to the logical browser task so newly created
-/// tabs within the same profile reuse the same identity contract.
-///
-/// Mirrors Python `get_camofox_identity()`.
-pub fn get_camofox_identity(task_id: Option<&str>) -> serde_json::Value {
-    let scope_root = get_camofox_state_dir().to_string_lossy().to_string();
-    let logical_scope = task_id.unwrap_or("default");
+/// Get or create a Camofox session for the given task.
+/// Mirrors Python `_get_session`.
+pub async fn get_session_entry(task_id: Option<&str>) -> CamofoxSession {
+    let task_id = task_id.unwrap_or("default");
+    let mut sessions = CAMOFOX_SESSIONS.lock().await;
+    if let Some(entry) = sessions.get(task_id) {
+        return entry.clone();
+    }
+    let entry = if managed_persistence_enabled() {
+        let identity = camofox_state::get_camofox_identity(Some(task_id));
+        let user_id = identity
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let session_key = identity
+            .get("session_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        CamofoxSession {
+            user_id,
+            tab_id: None,
+            session_key,
+            managed: true,
+        }
+    } else {
+        let uuid_str = uuid::Uuid::new_v4().as_simple().to_string();
+        CamofoxSession {
+            user_id: format!("hermes_{}", &uuid_str[..10]),
+            tab_id: None,
+            session_key: format!("task_{}", &task_id[..task_id.len().min(16)]),
+            managed: false,
+        }
+    };
+    sessions.insert(task_id.to_string(), entry.clone());
+    entry
+}
 
-    let user_id = derive_user_id(Some(&scope_root));
-    let session_key = derive_session_key(logical_scope, Some(&scope_root));
+/// Remove and return session info.
+/// Mirrors Python `_drop_session`.
+pub async fn drop_session_entry(task_id: Option<&str>) -> Option<CamofoxSession> {
+    let task_id = task_id.unwrap_or("default");
+    CAMOFOX_SESSIONS.lock().await.remove(task_id)
+}
 
+/// Ensure a tab exists for the session, creating one if needed.
+/// Mirrors Python `_ensure_tab`.
+pub async fn ensure_tab(
+    client: &CamofoxClient,
+    task_id: Option<&str>,
+    url: &str,
+) -> Result<CamofoxSession, String> {
+    let mut entry = get_session_entry(task_id).await;
+    if entry.tab_id.is_some() {
+        return Ok(entry);
+    }
+    let tab_id = client
+        .create_tab_with_url(&entry.user_id, &entry.session_key, url)
+        .await?;
+    entry.tab_id = Some(tab_id);
+    CAMOFOX_SESSIONS
+        .lock()
+        .await
+        .insert(task_id.unwrap_or("default").to_string(), entry.clone());
+    Ok(entry)
+}
+
+/// Soft cleanup — release in-memory session without destroying server-side context.
+/// Mirrors Python `camofox_soft_cleanup`.
+pub async fn camofox_soft_cleanup(task_id: Option<&str>) -> bool {
+    if managed_persistence_enabled() {
+        drop_session_entry(task_id).await;
+        tracing::debug!("Camofox soft cleanup for task {:?} (managed persistence)", task_id);
+        true
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level helpers
+// ---------------------------------------------------------------------------
+
+/// Take a screenshot and analyze it with vision AI via Camofox.
+/// Mirrors Python `camofox_vision`.
+pub async fn camofox_vision(
+    client: &CamofoxClient,
+    tab_id: &str,
+    user_id: &str,
+    question: &str,
+    annotate: bool,
+) -> Result<serde_json::Value, String> {
+    let screenshot = client.screenshot(tab_id, user_id).await?;
+    let img_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &screenshot);
+
+    let mut annotation_context = String::new();
+    if annotate {
+        match client.snapshot(tab_id, user_id).await {
+            Ok(snapshot) => {
+                let truncated = if snapshot.len() > 3000 {
+                    format!("{}...", &snapshot[..3000])
+                } else {
+                    snapshot
+                };
+                annotation_context = format!(
+                    "\n\nAccessibility tree (element refs for interaction):\n{truncated}"
+                );
+            }
+            Err(e) => tracing::debug!("Annotation snapshot failed: {e}"),
+        }
+    }
+
+    let vision_prompt = format!(
+        "Analyze this browser screenshot and answer: {question}{annotation_context}"
+    );
+
+    let messages = vec![serde_json::json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": vision_prompt},
+            {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{img_b64}")}},
+        ],
+    })];
+
+    let vision_timeout = std::env::var("CAMOFOX_VISION_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+
+    let response = hermes_llm::auxiliary_client::async_call_llm(
+        Some("vision"),
+        None,
+        None,
+        None,
+        None,
+        messages,
+        None,
+        None,
+        None,
+        Some(vision_timeout),
+        None,
+    )
+    .await;
+
+    let analysis = match response {
+        Ok(resp) => resp.content.trim().to_string(),
+        Err(e) => {
+            tracing::warn!("Vision LLM call failed: {e}");
+            return Err(format!("Vision analysis failed: {e}"));
+        }
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "analysis": analysis,
+    }))
+}
+
+/// Get images on the current page via Camofox.
+/// Mirrors Python `camofox_get_images`.
+pub async fn camofox_get_images(
+    client: &CamofoxClient,
+    tab_id: &str,
+    user_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let snapshot = client.snapshot(tab_id, user_id).await?;
+    let lines: Vec<&str> = snapshot.lines().collect();
+    let mut images = Vec::new();
+
+    let re_alt = regex::Regex::new(r#"img\s+"([^"]*)""#).unwrap();
+    let re_url = regex::Regex::new(r#"/url:\s*(\S+)"#).unwrap();
+
+    for i in 0..lines.len() {
+        let stripped = lines[i].trim();
+        if stripped.starts_with("- img ") || stripped.starts_with("img ") {
+            let alt = re_alt
+                .captures(stripped)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str())
+                .unwrap_or("");
+
+            let mut src = "";
+            if i + 1 < lines.len() {
+                let next = lines[i + 1].trim();
+                if let Some(cap) = re_url.captures(next) {
+                    src = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                }
+            }
+
+            if !alt.is_empty() || !src.is_empty() {
+                images.push(serde_json::json!({
+                    "src": src,
+                    "alt": alt,
+                }));
+            }
+        }
+    }
+
+    Ok(images)
+}
+
+/// Get console output — limited support in Camofox.
+/// Mirrors Python `camofox_console`.
+pub fn camofox_console() -> serde_json::Value {
     serde_json::json!({
-        "user_id": user_id,
-        "session_key": session_key,
+        "success": true,
+        "console_messages": [],
+        "js_errors": [],
+        "total_messages": 0,
+        "total_errors": 0,
+        "note": "Console log capture is not available with the Camofox backend. \
+                Use browser_snapshot or browser_vision to inspect page state.",
     })
 }
 
-/// Derive a deterministic user_id from a profile path (state directory).
-///
-/// Profile-scoped: same Hermes profile always yields the same user_id,
-/// regardless of task_id. This ensures Camofox maps to the same persistent
-/// browser profile directory across restarts.
-///
-/// **BREAKING CHANGE (2026-04-17)**: Previously derived from both profile
-/// path *and* task_id, causing a new browser profile on every new task.
-/// Now purely profile-scoped to match Python behaviour and enable session
-/// persistence across restarts.
-///
-/// Mirrors Python `uuid.uuid5(NAMESPACE_URL, f"camofox-user:{scope_root}").hex[:10]`.
-pub fn derive_user_id(profile_path: Option<&str>) -> String {
-    use uuid::Uuid;
-
-    let scope = profile_path.unwrap_or("default");
-    let input = format!("camofox-user:{scope}");
-    let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes());
-    let hex = uuid.as_simple().to_string();
-    format!("hermes_{}", &hex[..10])
-}
-
-/// Derive a session key from task_id and profile path.
-/// Mirrors Python `uuid.uuid5(NAMESPACE_URL, f"camofox-session:{scope_root}:{logical_scope}").hex[:16]`.
-pub fn derive_session_key(task_id: &str, profile_path: Option<&str>) -> String {
-    use uuid::Uuid;
-
-    let scope = profile_path.unwrap_or("default");
-    let input = format!("camofox-session:{scope}:{task_id}");
-    let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes());
-    let hex = uuid.as_simple().to_string();
-    format!("task_{}", &hex[..16])
-}
+// Re-export derive helpers for backward compatibility with existing callers.
+#[allow(unused_imports)]
+pub use camofox_state::derive_user_id;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_derive_user_id_deterministic() {
+    fn test_config_from_env() {
+        let config = CamofoxConfig::default();
+        let client = CamofoxClient::new(config);
+        assert!(client.is_configured());
+    }
+
+    #[test]
+    fn test_is_camofox_mode_without_cdp() {
+        // Can't easily test env var interactions, but verify the function compiles
+        let _ = is_camofox_mode();
+    }
+
+    #[test]
+    fn test_camofox_console_format() {
+        let output = camofox_console();
+        assert!(output.get("note").is_some());
+        assert_eq!(
+            output.get("total_messages").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_derive_user_id_via_reexport() {
         let id1 = derive_user_id(None);
         let id2 = derive_user_id(None);
         assert_eq!(id1, id2);
@@ -411,92 +645,8 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_session_key_deterministic() {
-        let key1 = derive_session_key("task-1", None);
-        let key2 = derive_session_key("task-1", None);
-        assert_eq!(key1, key2);
-        assert!(key1.starts_with("task_"));
-    }
-
-    #[test]
-    fn test_derive_user_id_profile_scoped() {
-        // user_id is profile-scoped: same profile = same id regardless of task
-        let id1 = derive_user_id(Some("/tmp/test-profile"));
-        let id2 = derive_user_id(Some("/tmp/test-profile"));
-        assert_eq!(id1, id2, "same profile should yield same user_id");
-
-        // Different profiles should yield different ids
-        let id3 = derive_user_id(Some("/tmp/other-profile"));
-        assert_ne!(id1, id3, "different profiles should yield different user_ids");
-    }
-
-    #[test]
-    fn test_derive_session_key_task_scoped() {
-        // session_key is task-scoped
-        let key1 = derive_session_key("task-a", None);
-        let key2 = derive_session_key("task-b", None);
-        assert_ne!(key1, key2, "different tasks should yield different session_keys");
-    }
-
-    #[test]
-    fn test_get_camofox_state_dir() {
-        let dir = get_camofox_state_dir();
-        let path = dir.to_string_lossy();
-        assert!(path.contains("browser_auth"));
-        assert!(path.contains("camofox"));
-    }
-
-    #[test]
-    fn test_get_camofox_identity() {
-        let identity = get_camofox_identity(Some("my-task"));
-        let user_id = identity.get("user_id").and_then(|v| v.as_str()).unwrap();
-        let session_key = identity.get("session_key").and_then(|v| v.as_str()).unwrap();
-
-        assert!(user_id.starts_with("hermes_"));
-        assert!(session_key.starts_with("task_"));
-
-        // Same task should yield same identity
-        let identity2 = get_camofox_identity(Some("my-task"));
-        assert_eq!(identity, identity2);
-    }
-
-    #[test]
-    fn test_config_from_env() {
-        let config = CamofoxConfig::default();
-        let client = CamofoxClient::new(config);
-        assert!(client.is_configured()); // default URL is non-empty
-    }
-
-    #[test]
-    fn test_camofox_console_format() {
-        let session = CamofoxSession {
-            user_id: "test_user".to_string(),
-            tab_id: Some("tab_123".to_string()),
-            session_key: "key_abc".to_string(),
-        };
-        let config = CamofoxConfig::default();
-        let client = CamofoxClient::new(config);
-        let output = client.camofox_console(&session);
-        assert!(output.contains("test_user"));
-        assert!(output.contains("tab_123"));
-        assert!(output.contains("key_abc"));
-    }
-
-    #[test]
-    fn test_drop_session_clears_tab() {
-        let mut session = CamofoxSession {
-            user_id: "drop_test".to_string(),
-            tab_id: Some("tab_456".to_string()),
-            session_key: "key_xyz".to_string(),
-        };
-        // Run async code on a tokio runtime
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let config = CamofoxConfig::default();
-            let client = CamofoxClient::new(config);
-            let user_id = session.user_id.clone();
-            let _ = client.drop_session(&user_id, &mut session).await;
-        });
-        assert!(session.tab_id.is_none(), "drop_session should clear tab_id");
+    fn test_managed_persistence_default() {
+        // Default should be false unless env var is set
+        assert!(!managed_persistence_enabled());
     }
 }

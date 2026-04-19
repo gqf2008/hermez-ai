@@ -5,7 +5,8 @@
 //! Mirrors the Python `hermes_state.py` SessionDB class.
 
 pub(crate) mod insights;
-pub(crate) mod models;
+pub mod models;
+pub use models::Message;
 pub(crate) mod schema;
 pub mod session_db;
 

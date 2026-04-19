@@ -43,7 +43,8 @@ dirs.workspace = true
 base64 = "0.22.1"
 bollard.workspace = true
 futures-util = "0.3"
-rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+rmcp = { workspace = true, features = ["client", "server", "macros", "transport-child-process", "transport-io"] }
+schemars = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 unicode-normalization = "0.1"
 

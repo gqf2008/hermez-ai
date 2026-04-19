@@ -37,6 +37,8 @@ pub(crate) mod code_exec;
 pub(crate) mod delegate;
 #[cfg(feature = "mcp")]
 pub(crate) mod mcp_client;
+#[cfg(feature = "mcp")]
+pub mod mcp_serve;
 pub(crate) mod memory;
 pub(crate) mod todo;
 pub mod skills;
