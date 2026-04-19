@@ -10,6 +10,7 @@ pub(crate) mod failover;
 pub(crate) mod memory_manager;
 pub(crate) mod memory_provider;
 pub(crate) mod message_loop;
+pub mod plugin_system;
 pub(crate) mod review_agent;
 pub(crate) mod self_evolution;
 pub(crate) mod skill_commands;

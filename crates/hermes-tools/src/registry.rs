@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -60,9 +61,9 @@ pub struct ToolEntry {
 #[derive(Clone)]
 pub struct ToolRegistry {
     /// All registered tools, keyed by name.
-    tools: HashMap<String, Arc<ToolEntry>>,
+    tools: Arc<RwLock<HashMap<String, Arc<ToolEntry>>>>,
     /// Toolset availability checks, keyed by toolset name.
-    toolset_checks: HashMap<String, Arc<CheckFn>>,
+    toolset_checks: Arc<RwLock<HashMap<String, Arc<CheckFn>>>>,
 }
 
 impl Default for ToolRegistry {
@@ -75,8 +76,8 @@ impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
-            toolset_checks: HashMap::new(),
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            toolset_checks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -86,7 +87,7 @@ impl ToolRegistry {
     /// a warning is logged and the entry is overwritten.
     #[allow(clippy::too_many_arguments)]
     pub fn register(
-        &mut self,
+        &self,
         name: String,
         toolset: String,
         schema: Value,
@@ -97,8 +98,9 @@ impl ToolRegistry {
         emoji: String,
         max_result_size_chars: Option<usize>,
     ) {
+        let mut tools = self.tools.write();
         // Check for name collisions
-        if let Some(existing) = self.tools.get(&name) {
+        if let Some(existing) = tools.get(&name) {
             if existing.toolset != toolset {
                 tracing::warn!(
                     "Tool name collision: '{}' (toolset '{}') is being overwritten by toolset '{}'",
@@ -109,8 +111,9 @@ impl ToolRegistry {
 
         // Store toolset check if provided
         if let Some(check) = &check_fn {
-            if !self.toolset_checks.contains_key(&toolset) {
-                self.toolset_checks.insert(toolset.clone(), Arc::clone(check));
+            let mut checks = self.toolset_checks.write();
+            if !checks.contains_key(&toolset) {
+                checks.insert(toolset.clone(), Arc::clone(check));
             }
         }
 
@@ -127,32 +130,34 @@ impl ToolRegistry {
             max_result_size_chars,
         };
 
-        self.tools.insert(name, Arc::new(entry));
+        tools.insert(name, Arc::new(entry));
     }
 
     /// Remove a tool from the registry.
     ///
     /// Used by MCP dynamic tool discovery when a server sends
     /// `notifications/tools/list_changed`.
-    pub fn deregister(&mut self, name: &str) {
-        if let Some(entry) = self.tools.remove(name) {
+    pub fn deregister(&self, name: &str) {
+        let mut tools = self.tools.write();
+        if let Some(entry) = tools.remove(name) {
             // Clean up toolset check if no other tools remain in the same toolset
             let toolset = &entry.toolset;
-            let still_has_tools = self.tools.values().any(|e| e.toolset == *toolset);
+            let still_has_tools = tools.values().any(|e| e.toolset == *toolset);
+            drop(tools);
             if !still_has_tools {
-                self.toolset_checks.remove(toolset);
+                self.toolset_checks.write().remove(toolset);
             }
         }
     }
 
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<ToolEntry>> {
-        self.tools.get(name).cloned()
+        self.tools.read().get(name).cloned()
     }
 
     /// Check if a tool exists by name.
     pub fn has(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.tools.read().contains_key(name)
     }
 
     /// Dispatch a tool call by name.
@@ -161,7 +166,9 @@ impl ToolRegistry {
     pub fn dispatch(&self, name: &str, args: Value) -> Result<String> {
         let tool = self
             .tools
+            .read()
             .get(name)
+            .cloned()
             .ok_or_else(|| hermes_core::HermesError::new(
                 hermes_core::errors::ErrorCategory::ToolError,
                 format!("Unknown tool: {name}"),
@@ -177,7 +184,7 @@ impl ToolRegistry {
     pub fn get_definitions(&self, include_names: Option<&[String]>) -> Vec<ToolSchema> {
         let mut defs = Vec::new();
 
-        for entry in self.tools.values() {
+        for entry in self.tools.read().values() {
             // Skip if not in the inclusion list
             if let Some(names) = include_names {
                 if !names.contains(&entry.name) {
@@ -222,17 +229,18 @@ impl ToolRegistry {
 
     /// List all registered tool names.
     pub fn list_tools(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        self.tools.read().keys().cloned().collect()
     }
 
     /// List all registered toolsets.
     pub fn list_toolsets(&self) -> Vec<String> {
-        self.toolset_checks.keys().cloned().collect()
+        self.toolset_checks.read().keys().cloned().collect()
     }
 
     /// Get all tools (entries) that pass their availability checks.
     pub fn get_available_tools(&self) -> Vec<Arc<ToolEntry>> {
         self.tools
+            .read()
             .values()
             .filter(|entry| {
                 // Check availability function
@@ -252,17 +260,17 @@ impl ToolRegistry {
     ///
     /// Used by subagent manager to copy handlers into child registries.
     pub fn get_handler(&self, name: &str) -> Option<Arc<ToolHandler>> {
-        self.tools.get(name).map(|entry| Arc::clone(&entry.handler))
+        self.tools.read().get(name).map(|entry| Arc::clone(&entry.handler))
     }
 
     /// Get the number of registered tools.
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.read().len()
     }
 
     /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.read().is_empty()
     }
 }
 

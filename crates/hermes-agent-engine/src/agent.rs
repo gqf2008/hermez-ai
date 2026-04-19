@@ -44,6 +44,7 @@ use hermes_prompt::{
 };
 use hermes_llm::reasoning::extract_reasoning;
 use hermes_tools::registry::ToolRegistry;
+use crate::plugin_system::global_hooks;
 
 use crate::budget::IterationBudget;
 use crate::failover::{self, FailoverAction, FailoverState};
@@ -147,6 +148,8 @@ pub struct AIAgent {
     persist_session: bool,
     /// Index of last flushed message to session DB (prevents duplicate writes).
     last_flushed_db_idx: usize,
+    /// WASM plugins loaded at startup (Phase 1).
+    wasm_plugins: Vec<Arc<crate::plugin_system::WasmPluginRuntime>>,
 }
 
 impl AIAgent {
@@ -195,6 +198,19 @@ impl AIAgent {
         let session_db = config.session_db.clone();
         let persist_session = config.persist_session;
 
+        // Auto-load plugins on agent startup
+        let plugin_mgr = crate::plugin_system::PluginManager::new();
+        let loaded_plugins = plugin_mgr.auto_load(Some(tool_registry.clone()));
+        let mut wasm_plugins = Vec::new();
+        for plugin in &loaded_plugins {
+            if let Some(ref rt) = plugin.wasm_runtime {
+                wasm_plugins.push(rt.clone());
+            }
+        }
+        if !loaded_plugins.is_empty() {
+            tracing::info!("Auto-loaded {} plugin(s), {} WASM", loaded_plugins.len(), wasm_plugins.len());
+        }
+
         Ok(Self {
             config,
             tool_registry,
@@ -232,7 +248,20 @@ impl AIAgent {
             session_db,
             persist_session,
             last_flushed_db_idx: 0,
+            wasm_plugins,
         })
+    }
+
+    /// Invoke a lifecycle hook on all loaded WASM plugins.
+    fn invoke_wasm_hooks(&self, hook_name: &str, context: &std::collections::HashMap<String, serde_json::Value>) {
+        if self.wasm_plugins.is_empty() {
+            return;
+        }
+        for plugin in &self.wasm_plugins {
+            if let Err(e) = plugin.call_hook(hook_name, context) {
+                tracing::debug!("WASM hook '{}' failed for plugin '{}': {}", hook_name, plugin.plugin_name, e);
+            }
+        }
     }
 
     /// Build or retrieve the cached system prompt.
@@ -329,6 +358,12 @@ impl AIAgent {
         // Notifies all registered memory providers of the new turn so they
         // can prefetch context, update internal state, etc.
         self.turn_number += 1;
+        let mut hook_ctx = std::collections::HashMap::new();
+        hook_ctx.insert("turn_number".into(), serde_json::json!(self.turn_number));
+        hook_ctx.insert("user_message".into(), serde_json::json!(user_message));
+        global_hooks().invoke("on_session_start", &hook_ctx);
+        self.invoke_wasm_hooks("on_session_start", &hook_ctx);
+
         self.memory_manager.on_turn_start(
             self.turn_number,
             user_message,
@@ -661,6 +696,12 @@ impl AIAgent {
                         // sequential for interactive/dependent tools.
                         // Mirrors Python `_execute_tool_calls()` dispatch
                         // (run_agent.py:7163).
+                        let tool_calls_json: Vec<serde_json::Value> = deduped.iter().cloned().collect();
+                        let mut pre_ctx = std::collections::HashMap::new();
+                        pre_ctx.insert("tool_calls".into(), serde_json::json!(tool_calls_json));
+                        global_hooks().invoke("pre_tool_call", &pre_ctx);
+                        self.invoke_wasm_hooks("pre_tool_call", &pre_ctx);
+
                         let tool_results = if Self::should_parallelize_tool_batch(&deduped) {
                             tracing::debug!("Using concurrent tool execution for {} tools", deduped.len());
                             self.execute_tool_calls_concurrent(&deduped).await
@@ -668,6 +709,11 @@ impl AIAgent {
                             tracing::debug!("Using sequential tool execution for {} tools", deduped.len());
                             self.execute_tool_calls_sequential(&deduped).await
                         };
+
+                        let mut post_ctx = std::collections::HashMap::new();
+                        post_ctx.insert("tool_count".into(), serde_json::json!(tool_results.len()));
+                        global_hooks().invoke("post_tool_call", &post_ctx);
+                        self.invoke_wasm_hooks("post_tool_call", &post_ctx);
 
                         // Append all tool results to message history
                         for tool_result in tool_results {
@@ -1044,6 +1090,12 @@ impl AIAgent {
         // Persist session to SQLite and trajectory files
         let completed = exit_reason == "completed";
         self.persist_session(&messages, user_message, completed);
+
+        let mut end_ctx = std::collections::HashMap::new();
+        end_ctx.insert("exit_reason".into(), serde_json::json!(&exit_reason));
+        end_ctx.insert("api_calls".into(), serde_json::json!(api_call_count));
+        global_hooks().invoke("on_session_end", &end_ctx);
+        self.invoke_wasm_hooks("on_session_end", &end_ctx);
 
         TurnResult {
             response: final_response,

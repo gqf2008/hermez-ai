@@ -277,7 +277,7 @@ async fn run_child_agent(
 
 /// Create a child registry with only the allowed toolsets.
 fn create_child_registry(parent: &ToolRegistry, allowed_toolsets: &[String]) -> ToolRegistry {
-    let mut child = ToolRegistry::new();
+    let child = ToolRegistry::new();
 
     // Iterate all registered tools via parent's get()
     let all_names = parent.list_tools();
