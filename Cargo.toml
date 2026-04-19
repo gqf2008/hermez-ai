@@ -32,6 +32,11 @@ serde_json.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 dirs.workspace = true
+axum.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 
 [workspace]
 members = [
@@ -122,6 +127,7 @@ tracing-appender = "0.2"
 # Utilities
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
+axum = "0.7"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 thiserror = "2"
 anyhow = "1"

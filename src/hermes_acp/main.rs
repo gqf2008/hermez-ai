@@ -5,10 +5,13 @@
 
 use std::sync::Arc;
 
+use axum::{extract::State, routing::post, Json, Router};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+mod client;
 mod protocol;
+mod registry;
 mod server;
 mod session;
 
@@ -18,6 +21,12 @@ struct Cli {
     /// Enable verbose logging to stderr
     #[arg(short, long)]
     verbose: bool,
+    /// Run as a registry server for multi-agent discovery
+    #[arg(long)]
+    registry: bool,
+    /// Registry listen address (e.g. 127.0.0.1:8080)
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    registry_addr: String,
 }
 
 #[tokio::main]
@@ -48,6 +57,105 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    if cli.registry {
+        run_registry(&cli.registry_addr).await
+    } else {
+        run_acp_server().await
+    }
+}
+
+/// Run as an ACP registry server (HTTP API for agent discovery).
+async fn run_registry(addr: &str) -> anyhow::Result<()> {
+    tracing::info!("Starting ACP registry on http://{addr}");
+
+    let reg = Arc::new(registry::AgentRegistry::new());
+    let reg_clone = reg.clone();
+
+    // Spawn heartbeat purge task
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            reg_clone.purge_stale().await;
+        }
+    });
+
+    let app = Router::new()
+        .route("/register", post(registry_register))
+        .route("/heartbeat", post(registry_heartbeat))
+        .route("/deregister", post(registry_deregister))
+        .route("/discover", post(registry_discover))
+        .route("/list", post(registry_list))
+        .route("/get", post(registry_get))
+        .with_state(reg);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("ACP registry listening on http://{addr}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn registry_register(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+    Json(req): Json<registry::RegisterRequest>,
+) -> Json<serde_json::Value> {
+    let agent_id = reg.register(req).await;
+    Json(serde_json::json!({ "agent_id": agent_id }))
+}
+
+async fn registry_heartbeat(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+    Json(req): Json<registry::HeartbeatRequest>,
+) -> Json<serde_json::Value> {
+    let ok = reg.heartbeat(&req.agent_id).await;
+    Json(serde_json::json!({ "ok": ok }))
+}
+
+async fn registry_deregister(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+    Json(req): Json<registry::DeregisterRequest>,
+) -> Json<serde_json::Value> {
+    let ok = reg.deregister(&req.agent_id).await;
+    Json(serde_json::json!({ "ok": ok }))
+}
+
+async fn registry_discover(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+    Json(req): Json<registry::DiscoverRequest>,
+) -> Json<serde_json::Value> {
+    let resp = reg.discover(&req).await;
+    match serde_json::to_value(resp) {
+        Ok(v) => Json(v),
+        Err(_) => Json(serde_json::json!({"error": "serialization failed"})),
+    }
+}
+
+async fn registry_list(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+) -> Json<serde_json::Value> {
+    let agents = reg.list_all().await;
+    match serde_json::to_value(agents) {
+        Ok(v) => Json(v),
+        Err(_) => Json(serde_json::json!({"error": "serialization failed"})),
+    }
+}
+
+async fn registry_get(
+    State(reg): State<Arc<registry::AgentRegistry>>,
+    Json(params): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let agent_id = params.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+    match reg.get(agent_id).await {
+        Some(agent) => match serde_json::to_value(agent) {
+            Ok(v) => Json(v),
+            Err(_) => Json(serde_json::Value::Null),
+        },
+        None => Json(serde_json::Value::Null),
+    }
+}
+
+/// Run the ACP server (JSON-RPC over stdin/stdout).
+async fn run_acp_server() -> anyhow::Result<()> {
     // Create session manager
     let session_manager = Arc::new(session::SessionManager::new());
 

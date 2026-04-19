@@ -116,6 +116,8 @@ pub struct HermesConfig {
     pub disabled_toolsets: Vec<String>,
     /// Platform-specific disabled skills
     pub skills_platform_disabled: HashMap<String, Vec<String>>,
+    /// Plugin configuration
+    pub plugins: PluginsConfig,
     /// Config version for migration (current: 18)
     #[serde(rename = "_config_version", skip_serializing_if = "Option::is_none")]
     pub config_version: Option<u32>,
@@ -249,6 +251,18 @@ pub struct SkillsConfig {
     pub platform_disabled: HashMap<String, Vec<String>>,
     /// External skill directories
     pub external_dirs: Vec<PathBuf>,
+}
+
+/// Plugin configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Globally disabled plugins
+    pub disabled: Vec<String>,
+    /// Auto-load plugins on startup
+    pub auto_load: bool,
+    /// Plugin search directories
+    pub dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
