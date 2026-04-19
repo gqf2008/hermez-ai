@@ -1,0 +1,72 @@
+#!/bin/sh
+# commit-msg hook — enforce AI agent traceability in commit messages
+#
+# Install: git config core.hooksPath .githooks
+#
+# Rules:
+#   - Commit message MUST contain "Session:" and "Agent:" lines
+#   - Exceptions: revert commits, merge commits, and commits explicitly tagged
+#     with "[skip-traceability]" in the subject line
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="$2"
+
+# Allow merge commits and squash commits without traceability check
+if [ "$COMMIT_SOURCE" = "merge" ] || [ "$COMMIT_SOURCE" = "squash" ]; then
+    exit 0
+fi
+
+# Read the commit message
+MSG=$(cat "$COMMIT_MSG_FILE")
+
+# Check for explicit human override
+if echo "$MSG" | head -1 | grep -q '\[skip-traceability\]'; then
+    exit 0
+fi
+
+# Check for revert commits
+if echo "$MSG" | head -1 | grep -qi '^revert'; then
+    exit 0
+fi
+
+# Check required fields
+MISSING=""
+
+if ! echo "$MSG" | grep -qE '^Session:[ \t]*.+'; then
+    MISSING="$MISSING  - Session: <session_id>\n"
+fi
+
+if ! echo "$MSG" | grep -qE '^Agent:[ \t]*.+'; then
+    MISSING="$MISSING  - Agent: <agent_name>\n"
+fi
+
+if [ -n "$MISSING" ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  COMMIT REJECTED: Missing traceability fields"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This project requires every commit to include session and"
+    echo "agent identifiers for audit purposes (see AGENTS.md §12)."
+    echo ""
+    echo "Missing fields:"
+    printf "%b" "$MISSING"
+    echo ""
+    echo "Example commit message:"
+    echo ""
+    echo "  fix: resolve memory template path"
+    echo ""
+    echo "  Session: 2026-04-19-abc123"
+    echo "  Agent: kimi-code-cli"
+    echo ""
+    echo "If this is a human commit, add [skip-traceability] to the"
+    echo "subject line:"
+    echo ""
+    echo "  fix: something [skip-traceability]"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    exit 1
+fi
+
+exit 0
