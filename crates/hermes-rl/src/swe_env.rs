@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::base::AgentRunner;
 
 use crate::base::{
     AgentResult, EnvError, Environment, EnvironmentConfig, EvalSample,
@@ -686,6 +689,8 @@ pub struct SweEnv {
     index: usize,
     is_setup: bool,
     executor: SandboxExecutor,
+    /// Optional agent runner for real end-to-end evaluation.
+    agent_runner: Option<Arc<dyn AgentRunner>>,
 }
 
 impl SweEnv {
@@ -698,7 +703,14 @@ impl SweEnv {
             index: 0,
             is_setup: false,
             executor: SandboxExecutor::new(SandboxBackend::Local),
+            agent_runner: None,
         }
+    }
+
+    /// Set an agent runner for real end-to-end evaluation.
+    pub fn with_agent_runner(mut self, runner: Arc<dyn AgentRunner>) -> Self {
+        self.agent_runner = Some(runner);
+        self
     }
 
     /// Create a new SweEnv with custom configuration.
@@ -713,6 +725,7 @@ impl SweEnv {
             index: 0,
             is_setup: false,
             executor,
+            agent_runner: None,
         }
     }
 
@@ -739,6 +752,7 @@ impl SweEnv {
             index: 0,
             is_setup: true,
             executor,
+            agent_runner: None,
         }
     }
 
@@ -1013,7 +1027,11 @@ impl Environment for SweEnv {
             }
             messages.push(Message::user(&prompt));
 
-            let result = AgentResult::new(messages);
+            let result = if let Some(ref runner) = self.agent_runner {
+                runner.run(messages).await
+            } else {
+                AgentResult::new(messages)
+            };
             let (reward, signals) = self.compute_reward_breakdown(item, &result).await;
 
             let test_pass = signals.get("test_pass_rate").copied().unwrap_or(0.0);

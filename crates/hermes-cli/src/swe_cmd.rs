@@ -9,9 +9,11 @@
 //! - `hermes swe env` — show environment info and test sandbox
 
 use std::path::Path;
+use std::sync::Arc;
 
 use console::Style;
 use hermes_rl::Environment;
+use hermes_rl::base::{AgentRunner, AgentResult, Message as RlMessage};
 
 /// Options for SWE evaluation.
 #[derive(Default)]
@@ -26,10 +28,66 @@ pub struct SweEvaluateOptions {
     pub max_samples: usize,
     /// Output directory for results.
     pub output_dir: Option<String>,
-    /// Model name for display.
+    /// Model name for display / agent selection.
     pub model: Option<String>,
+    /// Whether to use a real agent loop (requires API key).
+    pub use_agent: bool,
     /// Whether to run in quick mode (fewer samples, faster).
     pub quick: bool,
+}
+
+/// Agent runner that bridges `AIAgent::run_conversation` to the SWE environment.
+struct SweAgentRunner {
+    agent: tokio::sync::Mutex<hermes_agent_engine::AIAgent>,
+    system_prompt: Option<String>,
+    max_turns: usize,
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for SweAgentRunner {
+    async fn run(&self, messages: Vec<RlMessage>) -> AgentResult {
+        let mut agent = self.agent.lock().await;
+
+        let system = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
+        let user = messages.iter().find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        let turn_result = agent.run_conversation(&user, system.as_deref(), None).await;
+
+        // Convert TurnResult → AgentResult
+        let final_response = turn_result.response.clone();
+        let turns_used = turn_result.api_calls;
+
+        // Convert Arc<Value> messages back to RlMessage
+        let mut rl_messages = Vec::new();
+        for msg in &turn_result.messages {
+            if let Some(obj) = msg.as_object() {
+                let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("assistant").to_string();
+                let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                rl_messages.push(RlMessage {
+                    role,
+                    content,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                });
+            }
+        }
+
+        let tools_used = AgentResult::collect_tools_used(&rl_messages);
+        let total_tool_calls = AgentResult::count_tool_calls(&rl_messages);
+        AgentResult {
+            messages: rl_messages,
+            turns_used,
+            finished_naturally: turn_result.exit_reason == "natural_stop",
+            reasoning_per_turn: Vec::new(),
+            tool_errors: Vec::new(),
+            tools_used,
+            total_tool_calls,
+            final_response,
+        }
+    }
 }
 
 /// Run SWE evaluation on a dataset.
@@ -47,6 +105,14 @@ pub async fn cmd_swe_evaluate(opts: &SweEvaluateOptions) -> anyhow::Result<()> {
     println!("  Sandbox:     {}", opts.sandbox);
     if opts.quick {
         println!("  Mode:        {}", yellow.apply_to("quick"));
+    }
+    if opts.use_agent {
+        println!("  Agent:       {}", green.apply_to("real AIAgent"));
+        if let Some(ref m) = opts.model {
+            println!("  Model:       {}", m);
+        }
+    } else {
+        println!("  Agent:       {}", dim.apply_to("placeholder (no LLM calls)"));
     }
     println!();
 
@@ -73,6 +139,31 @@ pub async fn cmd_swe_evaluate(opts: &SweEvaluateOptions) -> anyhow::Result<()> {
 
     // Setup environment
     let mut env = hermes_rl::swe_env::SweEnv::with_config(config);
+
+    // Attach real agent if requested
+    if opts.use_agent {
+        let mut agent_config = hermes_agent_engine::AgentConfig::default();
+        if let Some(ref model) = opts.model {
+            agent_config.model = model.clone();
+        }
+        agent_config.max_iterations = opts.quick.then_some(15).unwrap_or(30);
+        let tool_registry = Arc::new(hermes_tools::registry::ToolRegistry::new());
+        match hermes_agent_engine::AIAgent::new(agent_config, tool_registry) {
+            Ok(agent) => {
+                let runner = Arc::new(SweAgentRunner {
+                    agent: tokio::sync::Mutex::new(agent),
+                    system_prompt: env.config().system_prompt.clone(),
+                    max_turns: opts.quick.then_some(15).unwrap_or(30),
+                });
+                env = env.with_agent_runner(runner);
+            }
+            Err(e) => {
+                eprintln!("  {} Failed to create agent: {}", red.apply_to("✗"), e);
+                eprintln!("  Falling back to placeholder evaluation.");
+            }
+        }
+    }
+
     if let Err(e) = env.setup().await {
         eprintln!("  {} Failed to setup environment: {}", red.apply_to("✗"), e);
         return Ok(());

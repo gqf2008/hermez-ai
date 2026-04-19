@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 //! Plugin management command.
+//!
+//! Enhanced with manifest parsing, hook inspection, and runtime info.
 
 use console::Style;
 use std::path::PathBuf;
@@ -18,6 +20,7 @@ fn green() -> Style { Style::new().green() }
 fn cyan() -> Style { Style::new().cyan() }
 fn dim() -> Style { Style::new().dim() }
 fn yellow() -> Style { Style::new().yellow() }
+fn red() -> Style { Style::new().red() }
 
 /// Plugin metadata.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -59,6 +62,19 @@ fn save_registry(reg: &[PluginInfo]) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Manifest parsing
+// ---------------------------------------------------------------------------
+
+/// Read plugin.yaml from a plugin directory.
+fn read_manifest(plugin_dir: &std::path::Path) -> Option<hermes_agent_engine::plugin_system::PluginManifest> {
+    hermes_agent_engine::plugin_system::PluginManifest::from_dir(plugin_dir)
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
 /// Install a plugin from a Git URL or owner/repo shorthand.
 pub fn cmd_plugins_install(identifier: &str, force: bool) -> anyhow::Result<()> {
     let dir = plugins_dir();
@@ -76,7 +92,6 @@ pub fn cmd_plugins_install(identifier: &str, force: bool) -> anyhow::Result<()> 
     // Check if already installed
     if plugin_path.exists() {
         if force {
-            // Remove and reinstall
             std::fs::remove_dir_all(&plugin_path)?;
             println!("  {} Removed existing plugin: {}", yellow().apply_to("○"), name);
         } else {
@@ -103,6 +118,10 @@ pub fn cmd_plugins_install(identifier: &str, force: bool) -> anyhow::Result<()> 
 
     match output {
         Ok(out) if out.status.success() => {
+            // Parse manifest
+            let manifest = read_manifest(&plugin_path);
+            let version = manifest.as_ref().map(|m| m.version.clone()).filter(|v| !v.is_empty());
+
             // Add to registry
             let mut reg = load_registry();
             reg.retain(|p| p.name != name);
@@ -111,13 +130,32 @@ pub fn cmd_plugins_install(identifier: &str, force: bool) -> anyhow::Result<()> 
                 source: git_url.clone(),
                 enabled: true,
                 installed_at: chrono::Local::now().to_rfc3339(),
-                version: None,
+                version,
             });
             save_registry(&reg)?;
 
             println!("  {} Plugin installed: {}", green().apply_to("✓"), name);
             println!("    Source: {}", git_url);
             println!("    Path: {}", plugin_path.display());
+
+            // Show manifest info if available
+            if let Some(manifest) = manifest {
+                if !manifest.description.is_empty() {
+                    println!("    Description: {}", manifest.description);
+                }
+                if !manifest.author.is_empty() {
+                    println!("    Author: {}", manifest.author);
+                }
+                if !manifest.provides_hooks.is_empty() {
+                    println!("    Hooks: {}", manifest.provides_hooks.join(", "));
+                }
+                if !manifest.provides_tools.is_empty() {
+                    println!("    Tools: {}", manifest.provides_tools.join(", "));
+                }
+                if !manifest.pip_dependencies.is_empty() {
+                    println!("    Pip deps: {}", manifest.pip_dependencies.join(", "));
+                }
+            }
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -171,7 +209,6 @@ pub fn cmd_plugins_remove(name: &str) -> anyhow::Result<()> {
         println!("  {} Plugin not found: {}", yellow().apply_to("✗"), name);
     }
 
-    // Remove from registry
     let mut reg = load_registry();
     let before = reg.len();
     reg.retain(|p| p.name != name);
@@ -182,53 +219,222 @@ pub fn cmd_plugins_remove(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// List installed plugins.
+/// List installed plugins with manifest details.
 pub fn cmd_plugins_list() -> anyhow::Result<()> {
     let reg = load_registry();
-
-    // Also check for plugins in the directory
     let dir = plugins_dir();
-    let dir_plugins: Vec<String> = if dir.exists() {
-        std::fs::read_dir(&dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     println!();
     println!("{}", cyan().apply_to("◆ Installed Plugins"));
     println!();
 
-    if reg.is_empty() && dir_plugins.is_empty() {
+    if reg.is_empty() && !dir.exists() {
         println!("  {}", dim().apply_to("No plugins installed."));
         println!("  Install one with: hermes plugins install <owner/repo>");
-    } else {
-        // Merge registry and directory info
-        let mut seen = std::collections::HashSet::new();
-        for plugin in &reg {
-            seen.insert(&plugin.name);
-            let status = if plugin.enabled {
-                green().apply_to("enabled").to_string()
-            } else {
-                yellow().apply_to("disabled").to_string()
-            };
-            println!("  {} — {} ({})", plugin.name, status, plugin.source);
+        println!();
+        return Ok(());
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for plugin in &reg {
+        seen.insert(plugin.name.as_str());
+        let status = if plugin.enabled {
+            green().apply_to("enabled").to_string()
+        } else {
+            yellow().apply_to("disabled").to_string()
+        };
+
+        // Try to read manifest for extra info
+        let manifest = read_manifest(&dir.join(&plugin.name));
+        let hooks = manifest.as_ref().map(|m| m.provides_hooks.clone()).unwrap_or_default();
+        let tools = manifest.as_ref().map(|m| m.provides_tools.clone()).unwrap_or_default();
+
+        println!("  {} — {} ({})", plugin.name, status, plugin.source);
+        if let Some(ref v) = plugin.version {
+            println!("    Version: {}", v);
         }
-        // Show directory plugins not in registry
-        for name in &dir_plugins {
-            if !seen.contains(name) {
-                println!("  {} — {} (untracked)", name, dim().apply_to("local"));
+        if !hooks.is_empty() {
+            println!("    Hooks: {}", hooks.join(", "));
+        }
+        if !tools.is_empty() {
+            println!("    Tools: {}", tools.join(", "));
+        }
+    }
+
+    // Show directory plugins not in registry
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !seen.contains(name) {
+                    println!("  {} — {} (untracked)", name, dim().apply_to("local"));
+                }
             }
         }
     }
+
+    println!();
+    Ok(())
+}
+
+/// Show detailed info for a plugin.
+pub fn cmd_plugins_info(name: &str) -> anyhow::Result<()> {
+    let plugin_path = plugins_dir().join(name);
+    if !plugin_path.exists() {
+        println!("  {} Plugin not found: {}", yellow().apply_to("✗"), name);
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", cyan().apply_to(format!("◆ Plugin: {}", name)));
     println!();
 
+    let manifest = read_manifest(&plugin_path);
+    match manifest {
+        Some(m) => {
+            println!("  Name:        {}", m.name);
+            println!("  Version:     {}", m.version);
+            println!("  Description: {}", m.description);
+            println!("  Author:      {}", m.author);
+            println!("  Manifest:    v{}", m.manifest_version);
+            println!("  Path:        {}", plugin_path.display());
+
+            if !m.provides_hooks.is_empty() {
+                println!();
+                println!("  Hooks:");
+                for hook in &m.provides_hooks {
+                    println!("    • {}", hook);
+                }
+            }
+
+            if !m.provides_tools.is_empty() {
+                println!();
+                println!("  Tools:");
+                for tool in &m.provides_tools {
+                    println!("    • {}", tool);
+                }
+            }
+
+            if !m.pip_dependencies.is_empty() {
+                println!();
+                println!("  Pip dependencies:");
+                for dep in &m.pip_dependencies {
+                    println!("    • {}", dep);
+                }
+            }
+
+            if !m.requires_env.is_empty() {
+                println!();
+                println!("  Required env vars:");
+                for env in &m.requires_env {
+                    if let Some(s) = env.as_str() {
+                        println!("    • {}", s);
+                    } else if let Some(obj) = env.as_mapping() {
+                        let name = obj.get(&serde_yaml::Value::String("name".into()))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        println!("    • {}", name);
+                    }
+                }
+            }
+        }
+        None => {
+            println!("  {}", dim().apply_to("No plugin.yaml manifest found."));
+            println!("  Path: {}", plugin_path.display());
+        }
+    }
+
+    // Show registry status
+    let reg = load_registry();
+    if let Some(info) = reg.iter().find(|p| p.name == name) {
+        println!();
+        println!("  Registry status: {}", if info.enabled { green().apply_to("enabled") } else { yellow().apply_to("disabled") });
+        println!("  Source: {}", info.source);
+        println!("  Installed: {}", info.installed_at);
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Run a plugin's entry point (if defined).
+pub fn cmd_plugins_run(name: &str, args: &[String]) -> anyhow::Result<()> {
+    let plugin_path = plugins_dir().join(name);
+    if !plugin_path.exists() {
+        println!("  {} Plugin not found: {}", yellow().apply_to("✗"), name);
+        return Ok(());
+    }
+
+    let manifest = read_manifest(&plugin_path);
+    if manifest.is_none() {
+        println!("  {} Plugin has no manifest: {}", yellow().apply_to("✗"), name);
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", cyan().apply_to(format!("◆ Running plugin: {}", name)));
+    if !args.is_empty() {
+        println!("  Args: {}", args.join(" "));
+    }
+    println!();
+
+    // Check for a run script
+    let run_sh = plugin_path.join("run.sh");
+    let run_py = plugin_path.join("run.py");
+    let main_py = plugin_path.join("__init__.py");
+
+    if run_sh.exists() {
+        let output = std::process::Command::new("sh")
+            .arg(&run_sh)
+            .args(args)
+            .current_dir(&plugin_path)
+            .output()?;
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    } else if run_py.exists() {
+        let output = std::process::Command::new("python3")
+            .arg(&run_py)
+            .args(args)
+            .current_dir(&plugin_path)
+            .output()?;
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    } else if main_py.exists() {
+        println!("  {} Plugin has __init__.py but no run script.", dim().apply_to("→"));
+        println!("  To run manually: cd {} && python3 -c 'import {}'", plugin_path.display(), name);
+    } else {
+        println!("  {} No runnable entry point found.", yellow().apply_to("→"));
+        println!("  Expected: run.sh, run.py, or __init__.py");
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Show active hooks from the global hook registry.
+pub fn cmd_plugins_hooks() -> anyhow::Result<()> {
+    use hermes_agent_engine::plugin_system::global_hooks;
+
+    println!();
+    println!("{}", cyan().apply_to("◆ Active Plugin Hooks"));
+    println!();
+
+    let hooks = global_hooks().list();
+    if hooks.is_empty() {
+        println!("  {}", dim().apply_to("No hooks registered."));
+    } else {
+        for (name, count) in hooks {
+            println!("  {} — {} callback{}", name, count, if count == 1 { "" } else { "s" });
+        }
+    }
+
+    println!();
+    println!("{}", dim().apply_to("Valid hooks:"));
+    for hook in hermes_agent_engine::plugin_system::VALID_HOOKS {
+        println!("  {}", hook);
+    }
+    println!();
     Ok(())
 }
 
@@ -244,7 +450,6 @@ pub fn cmd_plugins_enable(name: &str) -> anyhow::Result<()> {
         }
     }
 
-    // Check if exists in directory
     if plugins_dir().join(name).exists() {
         reg.push(PluginInfo {
             name: name.to_string(),
@@ -283,6 +488,7 @@ pub fn cmd_plugins(
     identifier: Option<&str>,
     name: Option<&str>,
     force: bool,
+    args: &[String],
 ) -> anyhow::Result<()> {
     match action {
         "install" => {
@@ -298,6 +504,15 @@ pub fn cmd_plugins(
             cmd_plugins_remove(n)
         }
         "list" | "ls" | "" => cmd_plugins_list(),
+        "info" => {
+            let n = name.ok_or_else(|| anyhow::anyhow!("name is required"))?;
+            cmd_plugins_info(n)
+        }
+        "run" => {
+            let n = name.ok_or_else(|| anyhow::anyhow!("name is required"))?;
+            cmd_plugins_run(n, args)
+        }
+        "hooks" => cmd_plugins_hooks(),
         "enable" => {
             let n = name.ok_or_else(|| anyhow::anyhow!("name is required"))?;
             cmd_plugins_enable(n)
@@ -307,7 +522,7 @@ pub fn cmd_plugins(
             cmd_plugins_disable(n)
         }
         _ => {
-            anyhow::bail!("Unknown action: {}. Use install, update, remove, list, enable, or disable.", action);
+            anyhow::bail!("Unknown action: {}. Use install, update, remove, list, info, run, hooks, enable, or disable.", action);
         }
     }
 }
@@ -324,7 +539,6 @@ mod tests {
 
     #[test]
     fn test_plugin_enable_disable() {
-        // Test registry operations directly
         let mut reg = Vec::new();
         reg.push(PluginInfo {
             name: "test_plugin".to_string(),
@@ -334,7 +548,6 @@ mod tests {
             version: None,
         });
 
-        // Disable
         for plugin in &mut reg {
             if plugin.name == "test_plugin" {
                 plugin.enabled = false;
@@ -343,7 +556,6 @@ mod tests {
         }
         assert!(!reg.iter().find(|p| p.name == "test_plugin").unwrap().enabled);
 
-        // Re-enable
         for plugin in &mut reg {
             if plugin.name == "test_plugin" {
                 plugin.enabled = true;
