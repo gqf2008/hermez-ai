@@ -234,6 +234,24 @@ fn match_host(host: &str, pattern: &str) -> bool {
     }
 }
 
+/// Check if a URL is blocked by website policy.
+///
+/// Returns `None` if access is allowed, or a `HashMap` with block metadata
+/// (`host`, `rule`, `source`, `message`) if blocked.
+/// Mirrors Python `tools.website_policy.check_website_access`.
+pub fn check_website_access(url: &str) -> Option<HashMap<String, String>> {
+    let policy = WebsitePolicy::load();
+    let blocked = policy.check_access(url)?;
+    let mut result = blocked;
+    let host = result.get("host").cloned().unwrap_or_default();
+    let rule = result.get("rule").cloned().unwrap_or_default();
+    result.insert(
+        "message".to_string(),
+        format!("Blocked by website policy: {host} matched rule '{rule}'"),
+    );
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,6 +4,7 @@
 //! Uses the `rmcp` crate for stdio transport to MCP servers.
 //! Supports connecting to external MCP servers, listing their tools, and calling them.
 
+pub mod security;
 pub mod server;
 
 use serde_json::Value;

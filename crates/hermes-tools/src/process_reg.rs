@@ -6,6 +6,7 @@
 //! Manages background processes spawned by terminal(background=true).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -15,23 +16,31 @@ use crate::registry::{tool_error, ToolRegistry};
 
 /// A managed background process.
 #[derive(Debug, Clone)]
-struct ManagedProcess {
+pub(crate) struct ManagedProcess {
     session_id: String,
     command: String,
-    pid: Option<u32>,
+    pub(crate) pid: Option<u32>,
     running: bool,
     exit_code: Option<i32>,
     output_buffer: String,
     output_size: usize,
     spawned_at: String,
     last_polled: String,
+    notify_on_complete: bool,
+    watch_patterns: Vec<String>,
+    use_pty: bool,
+    watcher_platform: Option<String>,
+    watcher_chat_id: Option<String>,
+    watcher_user_id: Option<String>,
+    watcher_user_name: Option<String>,
+    watcher_thread_id: Option<String>,
 }
 
 /// Max output buffer size (200KB).
 const MAX_OUTPUT_SIZE: usize = 200 * 1024;
 
 /// Process registry singleton.
-static PROCESS_REGISTRY: Lazy<Mutex<HashMap<String, ManagedProcess>>> =
+pub(crate) static PROCESS_REGISTRY: Lazy<Mutex<HashMap<String, ManagedProcess>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Max number of tracked processes (LRU pruned at this limit).
@@ -411,6 +420,14 @@ pub fn register_process(
             output_size: 0,
             spawned_at: now.clone(),
             last_polled: now,
+            notify_on_complete: false,
+            watch_patterns: Vec::new(),
+            use_pty: false,
+            watcher_platform: None,
+            watcher_chat_id: None,
+            watcher_user_id: None,
+            watcher_user_name: None,
+            watcher_thread_id: None,
         },
     );
 }
@@ -437,6 +454,117 @@ pub fn mark_process_finished(session_id: &str, exit_code: i32) {
         p.running = false;
         p.exit_code = Some(exit_code);
         p.last_polled = chrono::Utc::now().to_rfc3339();
+    }
+}
+
+/// Spawn a local background process and register it.
+///
+/// Mirrors Python `process_registry.spawn_local`.
+pub fn spawn_local(
+    command: &str,
+    cwd: Option<&str>,
+    task_id: &str,
+    use_pty: bool,
+) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd.exe");
+        c.args(["/C", command]);
+        c
+    } else {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", command]);
+        c
+    };
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn background command: {e}"))?;
+
+    let pid = child.id();
+    let session_id = format!(
+        "proc_{:08x}_{:08x}",
+        task_id.as_bytes().iter().fold(0u32, |a, b| a.wrapping_add(*b as u32)),
+        pid
+    );
+
+    register_process(session_id.clone(), command.to_string(), Some(pid));
+
+    // Configure PTY flag
+    {
+        let mut registry = PROCESS_REGISTRY.lock();
+        if let Some(p) = registry.get_mut(&session_id) {
+            p.use_pty = use_pty;
+        }
+    }
+
+    let sid = session_id.clone();
+    std::thread::spawn(move || {
+        if let Ok(output) = child.wait_with_output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            update_process_output(&sid, &format!("{stdout}{stderr}"));
+            let exit_code = output.status.code().unwrap_or(-1);
+            mark_process_finished(&sid, exit_code);
+        }
+    });
+
+    Ok(session_id)
+}
+
+/// Spawn a background process via an environment backend.
+///
+/// Mirrors Python `process_registry.spawn_via_env`.
+pub fn spawn_via_env(
+    env: &Arc<dyn crate::environments::Environment>,
+    command: &str,
+    cwd: Option<&str>,
+    task_id: &str,
+) -> Result<String, String> {
+    // Non-local backends run inside the sandbox via env.execute() in a thread.
+    let command = command.to_string();
+    let task_id = task_id.to_string();
+    let cwd = cwd.map(|s| s.to_string());
+    let env = Arc::clone(env);
+
+    let session_id = format!(
+        "env_{:08x}_{:016x}",
+        task_id.as_bytes().iter().fold(0u32, |a, b| a.wrapping_add(*b as u32)),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
+    register_process(session_id.clone(), command.clone(), None);
+
+    let sid = session_id.clone();
+    std::thread::spawn(move || {
+        let result = env.execute(&command, cwd.as_deref(), None);
+        let combined = format!("{}{}", result.stdout, result.stderr);
+        update_process_output(&sid, &combined);
+        mark_process_finished(&sid, result.exit_code);
+    });
+
+    Ok(session_id)
+}
+
+/// Set notification and watch options on a registered process.
+pub fn set_process_notify_options(
+    session_id: &str,
+    notify_on_complete: bool,
+    watch_patterns: Vec<String>,
+) {
+    let mut registry = PROCESS_REGISTRY.lock();
+    if let Some(p) = registry.get_mut(session_id) {
+        p.notify_on_complete = notify_on_complete;
+        p.watch_patterns = watch_patterns;
     }
 }
 

@@ -118,7 +118,27 @@ impl Environment for SshEnvironment {
         };
 
         // Execute via SSH
-        execute_ssh_command(&self.config, &full_command)
+        execute_ssh_command(&self.config, &full_command, false)
+    }
+
+    fn execute_pty(&self, command: &str, cwd: Option<&str>, _timeout: Option<u64>) -> ProcessResult {
+        let default_cwd = self.cwd.to_string_lossy().to_string();
+        let effective_cwd = cwd.unwrap_or(&default_cwd);
+
+        let escaped_cwd = sh_escape(effective_cwd);
+        let escaped_command = sh_escape(command);
+        let escaped_snapshot = self.env_snapshot.lock().as_ref().map(|s| sh_escape(s));
+
+        let full_command = if let Some(snapshot) = escaped_snapshot {
+            format!(
+                "cd {escaped_cwd} && source {snapshot} 2>/dev/null; {escaped_command}"
+            )
+        } else {
+            format!("cd {escaped_cwd} && {escaped_command}")
+        };
+
+        // Force pseudo-terminal allocation with -tt
+        execute_ssh_command(&self.config, &full_command, true)
     }
 
     fn is_available(&self) -> bool {
@@ -128,12 +148,16 @@ impl Environment for SshEnvironment {
 }
 
 /// Execute a command over SSH.
-fn execute_ssh_command(config: &SshConfig, command: &str) -> ProcessResult {
+fn execute_ssh_command(config: &SshConfig, command: &str, use_pty: bool) -> ProcessResult {
     // In MVP: use the `ssh` CLI as a bridge until russh async runtime is integrated
     // This works synchronously and is easier to test
     let port = config.port.to_string();
 
     let mut cmd = std::process::Command::new("ssh");
+    if use_pty {
+        // -tt forces pseudo-terminal allocation even if stdin is not a tty
+        cmd.arg("-tt");
+    }
     cmd.args([
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",

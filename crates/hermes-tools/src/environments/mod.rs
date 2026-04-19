@@ -40,6 +40,11 @@ pub trait Environment: Send + Sync {
     /// Execute a command in this environment.
     fn execute(&self, command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult;
 
+    /// Execute a command with PTY support.
+    fn execute_pty(&self, command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult {
+        self.execute(command, cwd, timeout)
+    }
+
     /// Check if the environment is available.
     fn is_available(&self) -> bool {
         true
@@ -198,6 +203,10 @@ impl Environment for LocalEnvironment {
             },
         }
     }
+
+    fn execute_pty(&self, command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult {
+        execute_local_pty(command, cwd, timeout)
+    }
 }
 
 /// Create a local environment.
@@ -206,6 +215,185 @@ pub fn create_local_env(cwd: Option<&str>) -> LocalEnvironment {
         Some(dir) => LocalEnvironment::new().with_cwd(dir),
         None => LocalEnvironment::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PTY execution (local backend)
+// ---------------------------------------------------------------------------
+
+/// Execute a command in a pseudo-terminal.
+///
+/// On Unix, uses `libc` to create a real PTY (master/slave pair), fork,
+/// and collect output. On non-Unix, falls back to normal execution.
+#[cfg(unix)]
+fn execute_local_pty(command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult {
+    use std::ffi::CString;
+
+    unsafe {
+        // Open PTY master
+        let master = libc::posix_openpt(libc::O_RDWR);
+        if master < 0 {
+            return fallback_pty(command, cwd, timeout);
+        }
+
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            let _ = libc::close(master);
+            return fallback_pty(command, cwd, timeout);
+        }
+
+        let slave_name = libc::ptsname(master);
+        if slave_name.is_null() {
+            let _ = libc::close(master);
+            return fallback_pty(command, cwd, timeout);
+        }
+
+        let slave = libc::open(slave_name, libc::O_RDWR);
+        if slave < 0 {
+            let _ = libc::close(master);
+            return fallback_pty(command, cwd, timeout);
+        }
+
+        let pid = libc::fork();
+        if pid < 0 {
+            let _ = libc::close(master);
+            let _ = libc::close(slave);
+            return fallback_pty(command, cwd, timeout);
+        }
+
+        if pid == 0 {
+            // Child process
+            let _ = libc::close(master);
+            let _ = libc::setsid();
+            let _ = libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0);
+
+            libc::dup2(slave, libc::STDIN_FILENO);
+            libc::dup2(slave, libc::STDOUT_FILENO);
+            libc::dup2(slave, libc::STDERR_FILENO);
+            if slave > libc::STDERR_FILENO {
+                let _ = libc::close(slave);
+            }
+
+            if let Some(dir) = cwd {
+                let c_dir = CString::new(dir.as_bytes()).unwrap_or_default();
+                let _ = libc::chdir(c_dir.as_ptr());
+            }
+
+            let shell = CString::new("/bin/sh").unwrap();
+            let flag = CString::new("-c").unwrap();
+            let cmd = CString::new(command.as_bytes()).unwrap_or_default();
+            let args = [shell.as_ptr(), flag.as_ptr(), cmd.as_ptr(), std::ptr::null()];
+            libc::execvp(shell.as_ptr(), args.as_ptr());
+            libc::_exit(127);
+        }
+
+        // Parent process
+        let _ = libc::close(slave);
+
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4096];
+        let start = std::time::Instant::now();
+
+        loop {
+            // Check timeout
+            if let Some(secs) = timeout {
+                if start.elapsed().as_secs() >= secs {
+                    let _ = libc::kill(pid, libc::SIGTERM);
+                    let mut status = 0;
+                    let _ = libc::waitpid(pid, &mut status, 0);
+                    let _ = libc::close(master);
+                    let stdout = String::from_utf8_lossy(&output).to_string();
+                    return ProcessResult {
+                        stdout,
+                        stderr: "Command timed out in PTY mode".to_string(),
+                        exit_code: 124,
+                    };
+                }
+            }
+
+            // Poll for readability with 100ms timeout
+            let mut pfd = libc::pollfd {
+                fd: master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = libc::poll(&mut pfd, 1, 100);
+            if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+                let n = libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len());
+                if n > 0 {
+                    output.extend_from_slice(&buf[..n as usize]);
+                } else if n == 0 {
+                    break;
+                }
+            }
+
+            // Check if child has exited
+            let mut status = 0;
+            let w = libc::waitpid(pid, &mut status, libc::WNOHANG);
+            if w == pid {
+                // Drain remaining output
+                loop {
+                    let mut pfd2 = libc::pollfd {
+                        fd: master,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let r = libc::poll(&mut pfd2, 1, 50);
+                    if r > 0 && (pfd2.revents & libc::POLLIN) != 0 {
+                        let n = libc::read(
+                            master,
+                            buf.as_mut_ptr().cast::<libc::c_void>(),
+                            buf.len(),
+                        );
+                        if n > 0 {
+                            output.extend_from_slice(&buf[..n as usize]);
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                break;
+            } else if w < 0 {
+                break;
+            }
+        }
+
+        let mut status = 0;
+        let _ = libc::waitpid(pid, &mut status, 0);
+        let exit_code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status) as i32
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status) as i32
+        } else {
+            -1
+        };
+
+        let _ = libc::close(master);
+
+        let stdout = String::from_utf8_lossy(&output).to_string();
+        ProcessResult {
+            stdout,
+            stderr: String::new(),
+            exit_code,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn execute_local_pty(command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult {
+    fallback_pty(command, cwd, timeout)
+}
+
+/// Fallback when PTY allocation fails — run normally with a note.
+fn fallback_pty(command: &str, cwd: Option<&str>, timeout: Option<u64>) -> ProcessResult {
+    let env = LocalEnvironment::new();
+    let mut result = env.execute(command, cwd, timeout);
+    if result.exit_code == 0 {
+        result.stderr = "(PTY allocation failed — ran without pseudo-terminal)\n".to_string()
+            + &result.stderr;
+    }
+    result
 }
 
 #[cfg(test)]
