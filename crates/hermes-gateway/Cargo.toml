@@ -57,6 +57,10 @@ libc = "0.2"
 tempfile.workspace = true
 serial_test = "3"
 
+[features]
+default = []
+matrix-e2ee = ["dep:matrix-sdk"]
+
 [dependencies.matrix-sdk]
 version = "0.16"
 optional = true
