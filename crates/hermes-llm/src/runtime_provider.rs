@@ -184,6 +184,16 @@ fn resolve_provider(
         if std::env::var("GEMINI_API_KEY").is_ok() {
             return "gemini".to_string();
         }
+        if std::env::var("OLLAMA_HOST").is_ok()
+            || std::env::var("OLLAMA_BASE_URL").is_ok()
+        {
+            return "ollama".to_string();
+        }
+        if std::env::var("GEMINI_CLI_API_KEY").is_ok()
+            || std::env::var("GOOGLE_API_KEY").is_ok()
+        {
+            return "google-gemini-cli".to_string();
+        }
         return "openrouter".to_string();
     }
 
@@ -561,18 +571,42 @@ fn _resolve_api_key_provider(
 ) -> Option<RuntimeProvider> {
     let env_var = match provider {
         "gemini" => "GEMINI_API_KEY",
+        "google-gemini-cli" => "GEMINI_CLI_API_KEY",
         "zai" => "ZAI_API_KEY",
         "kimi" | "kimi-coding" => "KIMI_API_KEY",
         "minimax" | "minimax-cn" => "MINIMAX_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
+        "ollama" => "OLLAMA_API_KEY",
         _ => return None,
     };
 
-    let api_key = std::env::var(env_var).ok().filter(|s| !s.is_empty())?;
+    let mut api_key = std::env::var(env_var).ok().filter(|s| !s.is_empty()).unwrap_or_default();
 
-    let base_url = default_base_url(parse_provider(provider))
+    let mut base_url = default_base_url(parse_provider(provider))
         .unwrap_or("")
         .to_string();
+
+    // Ollama: allow OLLAMA_HOST / OLLAMA_BASE_URL override
+    if provider == "ollama" {
+        if let Ok(host) = std::env::var("OLLAMA_HOST") {
+            base_url = host.trim_end_matches('/').to_string() + "/v1";
+        } else if let Ok(base) = std::env::var("OLLAMA_BASE_URL") {
+            base_url = base.trim_end_matches('/').to_string() + "/v1";
+        }
+    }
+
+    // Google Gemini CLI: fallback to GOOGLE_API_KEY if GEMINI_CLI_API_KEY is empty
+    if provider == "google-gemini-cli" && api_key.is_empty() {
+        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+            if !key.is_empty() {
+                api_key = key;
+            }
+        }
+    }
+
+    if api_key.is_empty() && provider != "ollama" {
+        return None;
+    }
 
     let api_mode = _parse_api_mode(model_cfg.get("api_mode"))
         .or_else(|| _detect_api_mode_for_url(&base_url))
@@ -582,7 +616,11 @@ fn _resolve_api_key_provider(
         provider: provider.to_string(),
         api_mode,
         base_url,
-        api_key,
+        api_key: if provider == "ollama" && api_key.is_empty() {
+            "no-key-required".to_string()
+        } else {
+            api_key
+        },
         source: "env".to_string(),
         requested_provider: requested_provider.to_string(),
         ..Default::default()

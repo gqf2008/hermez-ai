@@ -143,6 +143,7 @@ pub async fn call_llm(request: LlmRequest) -> Result<LlmResponse, ClassifiedErro
         ProviderType::OpenAI | ProviderType::OpenRouter
         | ProviderType::Nous | ProviderType::Gemini | ProviderType::Zai
         | ProviderType::Kimi | ProviderType::Minimax | ProviderType::Custom
+        | ProviderType::Ollama | ProviderType::GoogleGeminiCli
         | ProviderType::Unknown => call_openai_compat(&request).await,
     }
 }

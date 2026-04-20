@@ -3062,9 +3062,12 @@ mod tests {
         assert_eq!(estimate_tokens(&messages), 0);
     }
 
+    // Serialize env-var tests to avoid cross-test contamination.
+    static STALE_TIMEOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_stale_call_timeout_default() {
-        // No base_url, no env var → default 300s
+        let _guard = STALE_TIMEOUT_LOCK.lock().unwrap();
         std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         let timeout = stale_call_timeout(None, &[]);
         assert_eq!(timeout, std::time::Duration::from_secs_f64(300.0));
@@ -3072,6 +3075,7 @@ mod tests {
 
     #[test]
     fn test_stale_call_timeout_local_disabled() {
+        let _guard = STALE_TIMEOUT_LOCK.lock().unwrap();
         std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         let timeout = stale_call_timeout(Some("http://localhost:8080"), &[]);
         assert_eq!(timeout, std::time::Duration::from_secs(u64::MAX));
@@ -3079,6 +3083,7 @@ mod tests {
 
     #[test]
     fn test_stale_call_timeout_large_context() {
+        let _guard = STALE_TIMEOUT_LOCK.lock().unwrap();
         std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         // Simulate >100K tokens (chars/4 heuristic → need >400K chars)
         let large_content = "x".repeat(440_000);
@@ -3089,6 +3094,7 @@ mod tests {
 
     #[test]
     fn test_stale_call_timeout_mid_context() {
+        let _guard = STALE_TIMEOUT_LOCK.lock().unwrap();
         std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         // Simulate >50K tokens but <100K (200K-400K chars)
         let content = "x".repeat(240_000);
@@ -3099,6 +3105,7 @@ mod tests {
 
     #[test]
     fn test_stale_call_timeout_env_override() {
+        let _guard = STALE_TIMEOUT_LOCK.lock().unwrap();
         std::env::set_var("HERMES_API_CALL_STALE_TIMEOUT", "60");
         let timeout = stale_call_timeout(None, &[]);
         assert_eq!(timeout, std::time::Duration::from_secs_f64(60.0));

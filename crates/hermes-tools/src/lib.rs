@@ -72,6 +72,7 @@ pub mod tool_backend_helpers;
 
 // Environment backends
 pub(crate) mod environments;
+pub(crate) mod feishu;
 
 use std::sync::Arc;
 
@@ -97,6 +98,7 @@ pub fn register_all_tools(registry: &mut crate::registry::ToolRegistry) {
     cron_tools::register_cron_tools(registry);
     session_search::register_session_search_tool(registry);
     send_message::register_send_message_tool(registry);
+    feishu::register_feishu_tools(registry);
     tts::register_tts_tool(registry);
     voice::register_voice_tool(registry);
     process_reg::register_process_tool(registry);

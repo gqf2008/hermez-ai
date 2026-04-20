@@ -11,6 +11,7 @@ use std::fmt;
 /// Mirrors Python `_PROVIDER_ALIASES` (auxiliary_client.py).
 pub const PROVIDER_ALIASES: &[(&str, &str)] = &[
     ("google", "gemini"),
+    ("gemini-cli", "google-gemini-cli"),
     ("z-ai", "zai"),
     ("z.ai", "zai"),
     ("zhipu", "zai"),
@@ -54,6 +55,8 @@ pub enum ProviderType {
     Minimax,
     Anthropic,
     OpenAI,
+    Ollama,
+    GoogleGeminiCli,
     Unknown,
 }
 
@@ -70,6 +73,8 @@ impl fmt::Display for ProviderType {
             ProviderType::Minimax => write!(f, "minimax"),
             ProviderType::Anthropic => write!(f, "anthropic"),
             ProviderType::OpenAI => write!(f, "openai"),
+            ProviderType::Ollama => write!(f, "ollama"),
+            ProviderType::GoogleGeminiCli => write!(f, "google-gemini-cli"),
             ProviderType::Unknown => write!(f, "unknown"),
         }
     }
@@ -95,6 +100,8 @@ pub fn parse_provider(name: &str) -> ProviderType {
         "minimax" => ProviderType::Minimax,
         "anthropic" => ProviderType::Anthropic,
         "openai" => ProviderType::OpenAI,
+        "ollama" => ProviderType::Ollama,
+        "google-gemini-cli" => ProviderType::GoogleGeminiCli,
         _ => ProviderType::Unknown,
     }
 }
@@ -121,6 +128,8 @@ pub fn default_base_url(provider: ProviderType) -> Option<&'static str> {
         ProviderType::Anthropic => Some("https://api.anthropic.com"),
         ProviderType::OpenAI => Some("https://api.openai.com/v1"),
         ProviderType::Gemini => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        ProviderType::Ollama => Some("http://localhost:11434/v1"),
+        ProviderType::GoogleGeminiCli => Some("https://generativelanguage.googleapis.com/v1beta"),
         _ => None,
     }
 }
@@ -157,6 +166,8 @@ pub fn get_default_model_for_provider(provider: ProviderType) -> Option<&'static
         ProviderType::Zai => Some("glm-4-plus"),
         ProviderType::Kimi => Some("kimi-k2-0905"),
         ProviderType::Minimax => Some("MiniMax-M2.5"),
+        ProviderType::Ollama => Some("llama3"),
+        ProviderType::GoogleGeminiCli => Some("gemini-2.5-flash"),
         ProviderType::Custom | ProviderType::Unknown => None,
     }
 }
