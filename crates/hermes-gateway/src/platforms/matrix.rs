@@ -46,6 +46,7 @@ pub struct MatrixConfig {
     pub auto_thread: bool,
     pub reactions_enabled: bool,
     pub home_channel: Option<String>,
+    pub encryption: bool,
 }
 
 impl Default for MatrixConfig {
@@ -85,6 +86,10 @@ impl Default for MatrixConfig {
                 .map(|s| !matches!(s.to_lowercase().as_str(), "false" | "0" | "no"))
                 .unwrap_or(true),
             home_channel: std::env::var("MATRIX_HOME_ROOM").ok(),
+            encryption: std::env::var("MATRIX_ENCRYPTION")
+                .ok()
+                .map(|s| matches!(s.to_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false),
         }
     }
 }
@@ -419,6 +424,13 @@ impl MatrixAdapter {
     ) {
         let mut poll_interval = interval(Duration::from_millis(100));
         let mut consecutive_errors = 0u32;
+
+        if self.config.encryption {
+            #[cfg(feature = "matrix-e2ee")]
+            info!("Matrix E2EE enabled (matrix-sdk path)");
+            #[cfg(not(feature = "matrix-e2ee"))]
+            warn!("Matrix E2EE requested (MATRIX_ENCRYPTION=true) but the 'matrix-e2ee' feature is not enabled. Encrypted rooms will NOT work. Rebuild with --features matrix-e2ee to enable E2EE support.");
+        }
 
         info!("Matrix sync loop started");
 

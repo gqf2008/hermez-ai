@@ -1,4 +1,5 @@
 //! # Hermes Gateway
+#![recursion_limit = "256"]
 #![allow(clippy::too_many_arguments, clippy::result_large_err, dead_code)]
 //!
 //! Gateway session management, platform configuration, and messaging adapters.
