@@ -31,6 +31,11 @@ use crate::platforms::qqbot::{QqbotAdapter, QqbotConfig, QqbotMessageEvent};
 use crate::platforms::whatsapp::{WhatsAppAdapter, WhatsAppConfig, WhatsAppMessageEvent};
 use crate::platforms::sms::{SmsAdapter, SmsConfig};
 use crate::platforms::matrix::{MatrixAdapter, MatrixConfig};
+use crate::platforms::homeassistant::{HomeAssistantAdapter, HomeAssistantConfig};
+use crate::platforms::mattermost::{MattermostAdapter, MattermostConfig};
+use crate::platforms::signal::{SignalAdapter, SignalConfig};
+use crate::platforms::bluebubbles::{BlueBubblesAdapter, BlueBubblesConfig};
+use crate::platforms::wecom_callback::{WecomCallbackAdapter, WecomCallbackConfig};
 
 /// Gateway configuration.
 #[derive(Debug, Clone)]
@@ -110,6 +115,11 @@ struct HealthCheckStatus {
     email: bool,
     sms: bool,
     matrix: bool,
+    homeassistant: bool,
+    mattermost: bool,
+    signal: bool,
+    bluebubbles: bool,
+    wecom_callback: bool,
 }
 
 /// Health check HTTP handler.
@@ -131,6 +141,11 @@ async fn health_handler(
     platforms.insert("email".into(), serde_json::json!(status.email));
     platforms.insert("sms".into(), serde_json::json!(status.sms));
     platforms.insert("matrix".into(), serde_json::json!(status.matrix));
+    platforms.insert("homeassistant".into(), serde_json::json!(status.homeassistant));
+    platforms.insert("mattermost".into(), serde_json::json!(status.mattermost));
+    platforms.insert("signal".into(), serde_json::json!(status.signal));
+    platforms.insert("bluebubbles".into(), serde_json::json!(status.bluebubbles));
+    platforms.insert("wecom_callback".into(), serde_json::json!(status.wecom_callback));
 
     let body = serde_json::json!({
         "status": if status.running.load(Ordering::SeqCst) { "ok" } else { "stopped" },
@@ -156,6 +171,11 @@ pub struct GatewayRunner {
     email_adapter: Option<Arc<EmailAdapter>>,
     sms_adapter: Option<Arc<SmsAdapter>>,
     matrix_adapter: Option<Arc<MatrixAdapter>>,
+    homeassistant_adapter: Option<Arc<HomeAssistantAdapter>>,
+    mattermost_adapter: Option<Arc<MattermostAdapter>>,
+    signal_adapter: Option<Arc<SignalAdapter>>,
+    bluebubbles_adapter: Option<Arc<BlueBubblesAdapter>>,
+    wecom_callback_adapter: Option<Arc<WecomCallbackAdapter>>,
     api_server_shutdown_tx: Vec<oneshot::Sender<()>>,
     dingtalk_shutdown_tx: Vec<oneshot::Sender<()>>,
     feishu_shutdown_tx: Vec<oneshot::Sender<()>>,
@@ -166,6 +186,9 @@ pub struct GatewayRunner {
     webhook_shutdown_tx: Vec<oneshot::Sender<()>>,
     email_shutdown_tx: Vec<oneshot::Sender<()>>,
     sms_shutdown_tx: Vec<oneshot::Sender<()>>,
+    homeassistant_shutdown_tx: Vec<oneshot::Sender<()>>,
+    bluebubbles_shutdown_tx: Vec<oneshot::Sender<()>>,
+    wecom_callback_shutdown_tx: Vec<oneshot::Sender<()>>,
     // Matrix doesn't use oneshot shutdown — the sync loop checks running AtomicBool
     /// Health check server shutdown sender.
     health_check_shutdown_tx: Option<oneshot::Sender<()>>,
@@ -201,6 +224,11 @@ impl GatewayRunner {
             email_adapter: None,
             sms_adapter: None,
             matrix_adapter: None,
+            homeassistant_adapter: None,
+            mattermost_adapter: None,
+            signal_adapter: None,
+            bluebubbles_adapter: None,
+            wecom_callback_adapter: None,
             api_server_shutdown_tx: Vec::new(),
             dingtalk_shutdown_tx: Vec::new(),
             feishu_shutdown_tx: Vec::new(),
@@ -211,6 +239,9 @@ impl GatewayRunner {
             webhook_shutdown_tx: Vec::new(),
             email_shutdown_tx: Vec::new(),
             sms_shutdown_tx: Vec::new(),
+            homeassistant_shutdown_tx: Vec::new(),
+            bluebubbles_shutdown_tx: Vec::new(),
+            wecom_callback_shutdown_tx: Vec::new(),
             health_check_shutdown_tx: None,
             message_handler: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -369,6 +400,51 @@ impl GatewayRunner {
                         warn!("Matrix enabled but not configured (missing MATRIX_HOMESERVER + access token or password)");
                     }
                 }
+                Platform::Homeassistant => {
+                    let config = HomeAssistantConfig::from_env();
+                    if !config.hass_url.is_empty() && !config.hass_token.is_empty() {
+                        info!("Initializing Home Assistant adapter...");
+                        self.homeassistant_adapter = Some(Arc::new(HomeAssistantAdapter::new(config)));
+                    } else {
+                        warn!("Home Assistant enabled but not configured (missing HASS_URL/HASS_TOKEN)");
+                    }
+                }
+                Platform::Mattermost => {
+                    let config = MattermostConfig::from_env();
+                    if !config.token.is_empty() && !config.server_url.is_empty() {
+                        info!("Initializing Mattermost adapter...");
+                        self.mattermost_adapter = Some(Arc::new(MattermostAdapter::new(config)));
+                    } else {
+                        warn!("Mattermost enabled but not configured (missing MATTERMOST_SERVER_URL/TOKEN)");
+                    }
+                }
+                Platform::Signal => {
+                    let config = SignalConfig::from_env();
+                    if !config.phone_number.is_empty() && !config.signal_http_url.is_empty() {
+                        info!("Initializing Signal adapter...");
+                        self.signal_adapter = Some(Arc::new(SignalAdapter::new(config)));
+                    } else {
+                        warn!("Signal enabled but not configured (missing SIGNAL_PHONE_NUMBER/HTTP_URL)");
+                    }
+                }
+                Platform::Bluebubbles => {
+                    let config = BlueBubblesConfig::from_env();
+                    if !config.server_url.is_empty() && !config.password.is_empty() {
+                        info!("Initializing BlueBubbles adapter...");
+                        self.bluebubbles_adapter = Some(Arc::new(BlueBubblesAdapter::new(config)));
+                    } else {
+                        warn!("BlueBubbles enabled but not configured (missing BLUEBUBBLES_SERVER_URL/PASSWORD)");
+                    }
+                }
+                Platform::WecomCallback => {
+                    let config = WecomCallbackConfig::from_env();
+                    if !config.corp_id.is_empty() && !config.token.is_empty() && !config.encoding_aes_key.is_empty() {
+                        info!("Initializing WeCom callback adapter...");
+                        self.wecom_callback_adapter = Some(Arc::new(WecomCallbackAdapter::new(config)));
+                    } else {
+                        warn!("WeCom callback enabled but not configured (missing WECOM_CALLBACK_CORP_ID/TOKEN/ENCODING_AES_KEY)");
+                    }
+                }
                 _ => {
                     warn!("Platform {} not yet implemented in Rust", entry.platform.as_str());
                 }
@@ -389,12 +465,17 @@ impl GatewayRunner {
         let email_count = self.email_adapter.is_some() as usize;
         let sms_count = self.sms_adapter.is_some() as usize;
         let matrix_count = self.matrix_adapter.is_some() as usize;
+        let homeassistant_count = self.homeassistant_adapter.is_some() as usize;
+        let mattermost_count = self.mattermost_adapter.is_some() as usize;
+        let signal_count = self.signal_adapter.is_some() as usize;
+        let bluebubbles_count = self.bluebubbles_adapter.is_some() as usize;
+        let wecom_callback_count = self.wecom_callback_adapter.is_some() as usize;
         let feishu_webhook_count = self.feishu_adapter.as_ref()
             .map(|a| matches!(a.config.connection_mode, FeishuConnectionMode::Webhook))
             .unwrap_or(false) as usize;
         info!(
             "Gateway initialized: {} platform(s) ready",
-            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count + sms_count + matrix_count
+            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count + sms_count + matrix_count + homeassistant_count + mattermost_count + signal_count + bluebubbles_count + wecom_callback_count
         );
         if feishu_webhook_count > 0 {
             info!("Feishu webhook: port={} path={}",
@@ -975,6 +1056,81 @@ impl GatewayRunner {
             }
         }
 
+        // Home Assistant: start WebSocket listener
+        if let Some(adapter) = &self.homeassistant_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                adapter.run(handler, running, shutdown_rx).await;
+            });
+            self.homeassistant_shutdown_tx.push(shutdown_tx);
+            handles.push(handle);
+        }
+
+        // Mattermost: start WebSocket listener
+        if let Some(adapter) = &self.mattermost_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let handle = tokio::spawn(async move {
+                adapter.run(handler, running).await;
+            });
+            handles.push(handle);
+        }
+
+        // Signal: start SSE listener
+        if let Some(adapter) = &self.signal_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let handle = tokio::spawn(async move {
+                adapter.run(handler, running).await;
+            });
+            handles.push(handle);
+        }
+
+        // BlueBubbles: start webhook server
+        if let Some(adapter) = &self.bluebubbles_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let running_sessions = self.running_sessions.clone();
+            let busy_ack_ts = self.busy_ack_ts.clone();
+            let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = adapter.run(handler, running, running_sessions, busy_ack_ts, session_store, shutdown_rx, default_model, per_chat_model).await {
+                    error!("BlueBubbles webhook error: {e}");
+                }
+            });
+            self.bluebubbles_shutdown_tx.push(shutdown_tx);
+            handles.push(handle);
+        }
+
+        // WeCom callback: start HTTP server
+        if let Some(adapter) = &self.wecom_callback_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let running_sessions = self.running_sessions.clone();
+            let busy_ack_ts = self.busy_ack_ts.clone();
+            let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = adapter.run(handler, running, running_sessions, busy_ack_ts, session_store, shutdown_rx, default_model, per_chat_model).await {
+                    error!("WeCom callback server error: {e}");
+                }
+            });
+            self.wecom_callback_shutdown_tx.push(shutdown_tx);
+            handles.push(handle);
+        }
+
         // SMS: start webhook server
         if let Some(adapter) = &self.sms_adapter {
             let adapter = adapter.clone();
@@ -1042,6 +1198,11 @@ impl GatewayRunner {
             email: self.email_adapter.is_some(),
             sms: self.sms_adapter.is_some(),
             matrix: self.matrix_adapter.is_some(),
+            homeassistant: self.homeassistant_adapter.is_some(),
+            mattermost: self.mattermost_adapter.is_some(),
+            signal: self.signal_adapter.is_some(),
+            bluebubbles: self.bluebubbles_adapter.is_some(),
+            wecom_callback: self.wecom_callback_adapter.is_some(),
         };
         let (health_shutdown_tx, health_shutdown_rx) = oneshot::channel::<()>();
         let health_handle = tokio::spawn(async move {
@@ -1146,6 +1307,21 @@ impl GatewayRunner {
         if let Some(adapter) = self.email_adapter.take() {
             adapter.disconnect();
         }
+        // Trigger BlueBubbles graceful shutdown
+        let senders = std::mem::take(&mut self.bluebubbles_shutdown_tx);
+        for tx in senders {
+            let _ = tx.send(());
+        }
+        // Trigger WeCom callback graceful shutdown
+        let senders = std::mem::take(&mut self.wecom_callback_shutdown_tx);
+        for tx in senders {
+            let _ = tx.send(());
+        }
+        // Trigger Home Assistant graceful shutdown
+        let senders = std::mem::take(&mut self.homeassistant_shutdown_tx);
+        for tx in senders {
+            let _ = tx.send(());
+        }
         // Trigger health check server graceful shutdown
         if let Some(tx) = self.health_check_shutdown_tx.take() {
             let _ = tx.send(());
@@ -1180,6 +1356,11 @@ impl GatewayRunner {
             email_configured: self.email_adapter.is_some(),
             sms_configured: self.sms_adapter.is_some(),
             matrix_configured: self.matrix_adapter.is_some(),
+            homeassistant_configured: self.homeassistant_adapter.is_some(),
+            mattermost_configured: self.mattermost_adapter.is_some(),
+            signal_configured: self.signal_adapter.is_some(),
+            bluebubbles_configured: self.bluebubbles_adapter.is_some(),
+            wecom_callback_configured: self.wecom_callback_adapter.is_some(),
             platform_count: self.config.platforms.iter().filter(|p| p.enabled).count(),
         }
     }
@@ -1203,6 +1384,11 @@ pub struct GatewayStatus {
     pub email_configured: bool,
     pub sms_configured: bool,
     pub matrix_configured: bool,
+    pub homeassistant_configured: bool,
+    pub mattermost_configured: bool,
+    pub signal_configured: bool,
+    pub bluebubbles_configured: bool,
+    pub wecom_callback_configured: bool,
     pub platform_count: usize,
 }
 
@@ -1884,6 +2070,11 @@ pub fn load_gateway_config() -> GatewayConfig {
                                     "whatsapp" => Platform::Whatsapp,
                                     "webhook" => Platform::Webhook,
                                     "email" => Platform::Email,
+                                    "homeassistant" => Platform::Homeassistant,
+                                    "mattermost" => Platform::Mattermost,
+                                    "signal" => Platform::Signal,
+                                    "bluebubbles" => Platform::Bluebubbles,
+                                    "wecom_callback" => Platform::WecomCallback,
                                     _ => Platform::Local,
                                 };
                                 let cfg = PlatformConfig::default();
@@ -1989,6 +2180,41 @@ pub fn load_gateway_config() -> GatewayConfig {
         if std::env::var("MATRIX_HOMESERVER").is_ok() {
             platforms.push(PlatformConfigEntry {
                 platform: Platform::Matrix,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("HASS_TOKEN").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Homeassistant,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("MATTERMOST_SERVER_URL").is_ok() || std::env::var("MATTERMOST_TOKEN").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Mattermost,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("SIGNAL_PHONE_NUMBER").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Signal,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("BLUEBUBBLES_SERVER_URL").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Bluebubbles,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("WECOM_CALLBACK_TOKEN").is_ok() || std::env::var("WECOM_CALLBACK_CORP_ID").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::WecomCallback,
                 enabled: true,
                 config: PlatformConfig::default(),
             });
@@ -2667,6 +2893,11 @@ mod tests {
         assert!(!status.whatsapp_configured);
         assert!(!status.qqbot_configured);
         assert!(!status.email_configured);
+        assert!(!status.homeassistant_configured);
+        assert!(!status.mattermost_configured);
+        assert!(!status.signal_configured);
+        assert!(!status.bluebubbles_configured);
+        assert!(!status.wecom_callback_configured);
     }
 
     #[test]
@@ -2710,6 +2941,11 @@ mod tests {
             email: false,
             sms: false,
             matrix: false,
+            homeassistant: false,
+            mattermost: false,
+            signal: false,
+            bluebubbles: false,
+            wecom_callback: false,
         };
         // Verify clone works since HealthCheckStatus derives Clone
         let cloned = status.clone();
