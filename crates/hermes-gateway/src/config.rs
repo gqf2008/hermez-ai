@@ -713,6 +713,25 @@ fn apply_env_overrides(config: &mut GatewayConfig) {
         plat.extra.insert("server_url".to_string(), serde_json::Value::String(url));
         plat.extra.insert("password".to_string(), serde_json::Value::String(password));
     }
+
+    // WeCom Callback
+    if let (Some(corp_id), Some(token), Some(encoding_aes_key)) = (
+        env_var("WECOM_CALLBACK_CORP_ID"),
+        env_var("WECOM_CALLBACK_TOKEN"),
+        env_var("WECOM_CALLBACK_ENCODING_AES_KEY"),
+    ) {
+        let plat = config.platforms.entry("wecom_callback".to_string()).or_default();
+        plat.enabled = true;
+        plat.extra.insert("corp_id".to_string(), serde_json::Value::String(corp_id));
+        plat.extra.insert("token".to_string(), serde_json::Value::String(token));
+        plat.extra.insert("encoding_aes_key".to_string(), serde_json::Value::String(encoding_aes_key));
+        if let Some(corp_secret) = env_var("WECOM_CALLBACK_CORP_SECRET") {
+            plat.extra.insert("corp_secret".to_string(), serde_json::Value::String(corp_secret));
+        }
+        if let Some(agent_id) = env_var("WECOM_CALLBACK_AGENT_ID") {
+            plat.extra.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
+        }
+    }
 }
 
 /// Load gateway configuration from multiple sources.
