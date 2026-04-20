@@ -39,7 +39,7 @@ use crate::agent::types::Message;
 
 use hermes_core::{HermesConfig, Result};
 use hermes_prompt::{
-    apply_anthropic_cache_control, build_system_prompt, CompressorConfig, ContextCompressor,
+    apply_anthropic_cache_control, build_system_prompt, CompressorConfig,
     PromptBuilderConfig, ToolUseEnforcement, CacheTtl,
 };
 use hermes_llm::reasoning::extract_reasoning;
@@ -61,8 +61,8 @@ pub struct AIAgent {
     tool_registry: Arc<ToolRegistry>,
     /// Cached system prompt (rebuilt only after compression).
     cached_system_prompt: Option<String>,
-    /// Context compressor (if enabled).
-    compressor: Option<ContextCompressor>,
+    /// Context engine (if enabled).
+    context_engine: Option<Box<dyn hermes_prompt::ContextEngine>>,
     /// Memory manager for built-in + external memory providers.
     memory_manager: MemoryManager,
     /// Failover state for error recovery chain.
@@ -163,7 +163,7 @@ impl AIAgent {
         // Load full config from YAML for disabled tools, etc.
         let global_config = HermesConfig::load().ok();
 
-        let compressor = if config.compression_enabled {
+        let context_engine = if config.compression_enabled {
             let comp_config = config.compression_config.clone().unwrap_or_else(|| {
                 let mut c = CompressorConfig::default();
                 if let Some(ref gc) = global_config {
@@ -175,7 +175,8 @@ impl AIAgent {
                 }
                 c
             });
-            Some(ContextCompressor::new(comp_config))
+            let engine_name = config.context_engine_name.as_deref().unwrap_or("compressor");
+            hermes_prompt::create_engine(engine_name, Some(comp_config))
         } else {
             None
         };
@@ -215,7 +216,7 @@ impl AIAgent {
             config,
             tool_registry,
             cached_system_prompt: None,
-            compressor,
+            context_engine,
             memory_manager: MemoryManager::new(),
             failover_state: FailoverState::default(),
             budget: Arc::new(IterationBudget::new(max_iterations)),
@@ -470,8 +471,8 @@ impl AIAgent {
 
             // Context pressure warning — emit when nearing compaction threshold.
             // Mirrors Python `_emit_context_pressure()` (run_agent.py:7917).
-            if let Some(ref compressor) = self.compressor {
-                let threshold = compressor.threshold_tokens();
+            if let Some(ref engine) = self.context_engine {
+                let threshold = engine.threshold_tokens();
                 let approx_tokens = estimate_tokens(&messages);
                 let pressure_pct = approx_tokens * 100 / threshold;
                 if pressure_pct >= 80 {
@@ -737,10 +738,10 @@ impl AIAgent {
                         }
 
                         // Check context compression
-                        if let Some(ref mut compressor) = self.compressor {
-                            if compressor.should_compress(None) {
+                        if let Some(ref mut engine) = self.context_engine {
+                            if engine.should_compress(None) {
                                 let temp: Vec<Value> = messages.iter().map(|m| (**m).clone()).collect();
-                                messages = compressor.compress(&temp, None, None)
+                                messages = engine.compress(&temp, None, None)
                                     .into_iter().map(Arc::new).collect();
                                 // Rebuild system prompt after compression
                                 self.cached_system_prompt = None;
@@ -829,7 +830,7 @@ impl AIAgent {
                     );
 
                     // Map ClassifiedError → failover action
-                    let has_compressor = self.compressor.is_some();
+                    let has_compressor = self.context_engine.is_some();
                     let had_prior_success = api_call_count > 0;
                     let action = failover::apply_failover(
                         &classification,
@@ -926,9 +927,9 @@ impl AIAgent {
                                     "Failover: compressing context (attempt {}/{})",
                                     compression_attempts, max_compression_attempts
                                 );
-                                if let Some(ref mut compressor) = self.compressor {
+                                if let Some(ref mut engine) = self.context_engine {
                                     let temp: Vec<Value> = messages.iter().map(|m| (**m).clone()).collect();
-                                    messages = compressor.compress(&temp, None, None)
+                                    messages = engine.compress(&temp, None, None)
                                         .into_iter().map(Arc::new).collect();
                                     self.cached_system_prompt = None;
                                     let _ = self.build_system_prompt(system_message);
@@ -2553,6 +2554,7 @@ mod tests {
             enable_caching: false,
             compression_enabled: true,
             compression_config: None,
+            context_engine_name: None,
             terminal_cwd: Some(std::path::PathBuf::from("/tmp")),
             ephemeral_system_prompt: Some("override".to_string()),
             memory_nudge_interval: 5,
@@ -3063,18 +3065,21 @@ mod tests {
     #[test]
     fn test_stale_call_timeout_default() {
         // No base_url, no env var → default 300s
+        std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         let timeout = stale_call_timeout(None, &[]);
         assert_eq!(timeout, std::time::Duration::from_secs_f64(300.0));
     }
 
     #[test]
     fn test_stale_call_timeout_local_disabled() {
+        std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         let timeout = stale_call_timeout(Some("http://localhost:8080"), &[]);
         assert_eq!(timeout, std::time::Duration::from_secs(u64::MAX));
     }
 
     #[test]
     fn test_stale_call_timeout_large_context() {
+        std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         // Simulate >100K tokens (chars/4 heuristic → need >400K chars)
         let large_content = "x".repeat(440_000);
         let messages = vec![Arc::new(serde_json::json!({"role": "user", "content": large_content}))];
@@ -3084,6 +3089,7 @@ mod tests {
 
     #[test]
     fn test_stale_call_timeout_mid_context() {
+        std::env::remove_var("HERMES_API_CALL_STALE_TIMEOUT");
         // Simulate >50K tokens but <100K (200K-400K chars)
         let content = "x".repeat(240_000);
         let messages = vec![Arc::new(serde_json::json!({"role": "user", "content": content}))];

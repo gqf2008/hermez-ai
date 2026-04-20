@@ -8,6 +8,7 @@
 pub(crate) mod builder;
 pub(crate) mod cache_control;
 pub(crate) mod context_compressor;
+pub(crate) mod context_engine;
 pub(crate) mod context_references;
 pub(crate) mod injection_scan;
 pub(crate) mod skills_prompt;
@@ -25,6 +26,7 @@ pub use builder::{
 };
 pub use cache_control::{apply_anthropic_cache_control, CacheTtl};
 pub use context_compressor::{CompressorConfig, ContextCompressor};
+pub use context_engine::{ContextEngine, create_engine, available_engines};
 pub use injection_scan::{sanitize_context_content, scan_context_content};
 pub use skills_prompt::build_skills_system_prompt;
 pub use soul::{load_soul_md, has_soul_md, CONTEXT_FILE_MAX_CHARS};

@@ -136,8 +136,8 @@ impl AIAgent {
             *guard = None;
         }
 
-        if let Some(ref mut compressor) = self.compressor {
-            compressor.on_session_reset();
+        if let Some(ref mut engine) = self.context_engine {
+            engine.on_session_reset();
         }
 
         self.turn_number = 0;

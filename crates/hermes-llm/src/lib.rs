@@ -9,6 +9,7 @@ pub mod auxiliary_client;
 pub mod bedrock;
 pub mod client;
 pub(crate) mod codex;
+pub mod copilot_acp_client;
 pub mod credential_pool;
 pub mod error_classifier;
 pub mod model_metadata;

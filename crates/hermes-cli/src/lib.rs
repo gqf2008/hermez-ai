@@ -62,5 +62,6 @@ pub mod version_cmd;
 pub mod webhook_cmd;
 pub mod whatsapp_cmd;
 
+pub mod slash_commands;
 pub mod tips;
 pub mod tui;

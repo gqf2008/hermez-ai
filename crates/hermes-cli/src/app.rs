@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use hermes_agent_engine::agent::{AIAgent, AgentConfig};
+use hermes_agent_engine::agent::types::Message;
 use hermes_core::{HermesConfig, Result};
 use hermes_tools::registry::ToolRegistry;
 use hermes_tools::register_all_tools;
@@ -103,9 +104,15 @@ impl HermesApp {
         if !quiet {
             println!("Hermes Agent — {}", model_name);
             println!("Tools: {} registered", registry.len());
-            println!("Type 'quit' or 'exit' to leave, 'clear' to reset context.");
+            println!("Type /help for available commands, /quit to exit.");
             println!();
         }
+
+        // Conversation history across turns
+        let mut messages: Vec<Message> = Vec::new();
+        let mut last_query: Option<String> = None;
+        let mut session_title: Option<String> = None;
+        let mut yolo_mode = false;
 
         // Resolve provider for default model fallback.
         // When no model is explicitly configured, fall back to the provider's
@@ -195,7 +202,7 @@ impl HermesApp {
             })
         });
 
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             model: resolved_model.clone(),
             max_iterations,
             skip_context_files: skip_context,
@@ -218,7 +225,7 @@ impl HermesApp {
                 format!("Failed to create tokio runtime: {e}"),
             ))?;
 
-        let mut agent = AIAgent::new(config.clone(), Arc::new(registry))?;
+        let mut agent = AIAgent::new(config.clone(), Arc::new(registry.clone()))?;
 
         // Wire up callbacks for real-time output when not in quiet mode
         if !quiet {
@@ -302,30 +309,61 @@ impl HermesApp {
                 continue;
             }
 
-            // Handle built-in commands
+            // Handle slash commands
+            let mut should_exit = false;
+            let mut agent_turn_prompt: Option<String> = None;
+
+            if trimmed.starts_with('/') {
+                let without_slash = &trimmed[1..];
+                let (cmd, args) = match without_slash.find(' ') {
+                    Some(pos) => (&without_slash[..pos], &without_slash[pos + 1..]),
+                    None => (without_slash, ""),
+                };
+
+                let mut ctx = crate::slash_commands::SlashContext {
+                    agent: &mut agent,
+                    messages: &mut messages,
+                    config: &mut config,
+                    registry: &mut registry,
+                    quiet,
+                    last_query: &mut last_query,
+                    session_title: &mut session_title,
+                    yolo_mode: &mut yolo_mode,
+                    should_exit: &mut should_exit,
+                };
+
+                match crate::slash_commands::dispatch(cmd, args, &mut ctx) {
+                    crate::slash_commands::SlashResult::Handled => {
+                        if should_exit {
+                            break;
+                        }
+                        continue;
+                    }
+                    crate::slash_commands::SlashResult::AgentTurn(prompt) => {
+                        agent_turn_prompt = Some(prompt);
+                    }
+                    crate::slash_commands::SlashResult::Error(err) => {
+                        eprintln!("Error: {}", err);
+                        continue;
+                    }
+                }
+            }
+
+            // Also support legacy bare commands for backward compatibility
             match trimmed.to_lowercase().as_str() {
                 "quit" | "exit" | ":q" => break,
                 "clear" | ":clear" => {
-                    agent = AIAgent::new(
-                        AgentConfig {
-                            model: config.model.clone(),
-                            max_iterations: config.max_iterations,
-                            skip_context_files: config.skip_context_files,
-                            terminal_cwd: config.terminal_cwd.clone(),
-                            ..AgentConfig::default()
-                        },
-                        // Need to re-create registry — just reset by creating new agent
-                        Arc::new({
-                            let mut r = ToolRegistry::new();
-                            register_all_tools(&mut r);
-                            r
-                        }),
-                    )?;
+                    messages.clear();
+                    last_query = None;
+                    agent.reset_session_state();
                     println!("Context cleared.");
                     continue;
                 }
                 _ => {}
             }
+
+            let prompt = agent_turn_prompt.unwrap_or_else(|| trimmed.to_string());
+            last_query = Some(prompt.clone());
 
             // Show spinner during processing
             let spinner = if !quiet {
@@ -343,10 +381,18 @@ impl HermesApp {
                 None
             };
 
-            // Run the agent
+            // Run the agent with conversation history
+            let history_slice = if messages.is_empty() {
+                None
+            } else {
+                Some(messages.as_slice())
+            };
             let turn_result = rt.block_on(async {
-                agent.run_conversation(trimmed, None, None).await
+                agent.run_conversation(&prompt, None, history_slice).await
             });
+
+            // Update message history from turn result
+            messages = turn_result.messages.clone();
 
             // Stop spinner
             if let Some(s) = spinner {

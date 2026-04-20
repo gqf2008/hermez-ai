@@ -1620,6 +1620,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "dirs 5.0.1",
+ "dotenvy",
  "hermes-agent-engine",
  "hermes-batch",
  "hermes-core",

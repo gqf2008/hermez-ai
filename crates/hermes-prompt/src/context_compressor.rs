@@ -102,6 +102,54 @@ pub struct ContextCompressor {
     ineffective_compression_count: usize,
 }
 
+impl crate::context_engine::ContextEngine for ContextCompressor {
+    fn name(&self) -> &str {
+        "compressor"
+    }
+
+    fn on_session_start(&mut self) {
+        self.compression_count = 0;
+        self.previous_summary = None;
+        self.ineffective_compression_count = 0;
+        self.last_compression_savings_pct = 100.0;
+    }
+
+    fn on_session_reset(&mut self) {
+        self.compression_count = 0;
+        self.previous_summary = None;
+        self.ineffective_compression_count = 0;
+        self.last_compression_savings_pct = 100.0;
+        self.last_prompt_tokens = 0;
+        self.last_completion_tokens = 0;
+    }
+
+    fn update_from_response(&mut self, prompt_tokens: usize, completion_tokens: usize) {
+        self.last_prompt_tokens = prompt_tokens;
+        self.last_completion_tokens = completion_tokens;
+    }
+
+    fn should_compress(&self, prompt_tokens: Option<usize>) -> bool {
+        self.should_compress(prompt_tokens)
+    }
+
+    fn compress(
+        &mut self,
+        messages: &[Value],
+        current_tokens: Option<usize>,
+        focus_topic: Option<&str>,
+    ) -> Vec<Value> {
+        self.compress(messages, current_tokens, focus_topic)
+    }
+
+    fn on_session_end(&mut self) {
+        // Nothing special to clean up
+    }
+
+    fn threshold_tokens(&self) -> usize {
+        self.threshold_tokens()
+    }
+}
+
 impl ContextCompressor {
     /// Create a new context compressor.
     pub fn new(config: CompressorConfig) -> Self {

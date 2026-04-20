@@ -621,6 +621,7 @@ async fn run_agent(
         enable_caching: false,
         compression_enabled: false,
         compression_config: None,
+        context_engine_name: None,
         terminal_cwd: None,
         ephemeral_system_prompt: None,
         memory_nudge_interval: 0,  // disabled in ACP

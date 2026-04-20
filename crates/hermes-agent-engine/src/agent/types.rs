@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 /// Conversation message wrapped in Arc to avoid deep clones.
-pub(crate) type Message = Arc<serde_json::Value>;
+pub type Message = Arc<serde_json::Value>;
 
 use hermes_prompt::CompressorConfig;
 use hermes_llm::credential_pool::CredentialPool;
@@ -118,6 +118,9 @@ pub struct AgentConfig {
     pub compression_enabled: bool,
     /// Compression configuration.
     pub compression_config: Option<CompressorConfig>,
+    /// Context engine name (e.g. "compressor", "lcm").
+    /// Default is "compressor" when compression_enabled is true.
+    pub context_engine_name: Option<String>,
     /// Working directory for context file discovery.
     pub terminal_cwd: Option<std::path::PathBuf>,
     /// Ephemeral system message (not saved to session DB).
@@ -168,6 +171,7 @@ impl Default for AgentConfig {
             enable_caching: true,
             compression_enabled: false,
             compression_config: None,
+            context_engine_name: None,
             terminal_cwd: None,
             ephemeral_system_prompt: None,
             memory_nudge_interval: 10,
