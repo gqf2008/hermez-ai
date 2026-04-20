@@ -25,6 +25,10 @@ regex.workspace = true
 futures = "0.3"
 async-stream = "0.3"
 base64.workspace = true
+url.workspace = true
+sha1 = "0.10"
+urlencoding = "2.1"
+quick-xml = { version = "0.37", features = ["serialize"] }
 
 # Email adapter
 imap = { version = "2", features = ["native-tls"] }

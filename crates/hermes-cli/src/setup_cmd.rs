@@ -399,34 +399,35 @@ fn setup_agent_settings(config: &mut serde_yaml::Value) -> io::Result<()> {
 fn setup_gateway(config: &mut serde_yaml::Value) -> io::Result<()> {
     println!("\n{}", bold().apply_to("━━━ Messaging Gateway ━━━"));
     println!("\n{}", dim().apply_to("Connect Hermes to messaging platforms."));
-    println!("Available: Telegram, Discord, Slack, WhatsApp, Signal, Feishu, Webhook\n");
+    println!("Available: Telegram, Discord, Slack, WhatsApp, Signal, Feishu, WeCom, WeCom Callback, Weixin, QQ Bot, DingTalk, Email, SMS, Matrix, Mattermost, Home Assistant, BlueBubbles, Webhook\n");
 
     let platforms = [
-        "telegram",
-        "discord",
-        "slack",
-        "whatsapp",
-        "signal",
-        "feishu",
-        "webhook",
+        ("telegram", "TELEGRAM_BOT_TOKEN"),
+        ("discord", "DISCORD_BOT_TOKEN"),
+        ("slack", "SLACK_BOT_TOKEN"),
+        ("whatsapp", "WHATSAPP_BRIDGE_SCRIPT"),
+        ("signal", "SIGNAL_PHONE_NUMBER"),
+        ("feishu", "FEISHU_APP_ID"),
+        ("wecom", "WECOM_BOT_ID"),
+        ("wecom_callback", "WECOM_CALLBACK_TOKEN"),
+        ("weixin", "WEIXIN_SESSION_KEY"),
+        ("qqbot", "QQ_APP_ID"),
+        ("dingtalk", "DINGTALK_CLIENT_ID"),
+        ("email", "EMAIL_ADDRESS"),
+        ("sms", "TWILIO_ACCOUNT_SID"),
+        ("matrix", "MATRIX_ACCESS_TOKEN"),
+        ("mattermost", "MATTERMOST_TOKEN"),
+        ("homeassistant", "HASS_TOKEN"),
+        ("bluebubbles", "BLUEBUBBLES_SERVER_URL"),
+        ("webhook", "WEBHOOK_SECRET"),
     ];
 
     let mut selected: Vec<String> = Vec::new();
 
-    for platform in &platforms {
+    for (platform, env_key) in &platforms {
         if confirm(&format!("Enable {platform}?"))? {
-            let token = read_secret(&format!("{platform} token/bot key"))?;
+            let token = read_secret(&format!("{platform} credential"))?;
             if !token.is_empty() {
-                let env_key = match *platform {
-                    "telegram" => "TELEGRAM_BOT_TOKEN",
-                    "discord" => "DISCORD_BOT_TOKEN",
-                    "slack" => "SLACK_BOT_TOKEN",
-                    "whatsapp" => "WHATSAPP_TOKEN",
-                    "signal" => "SIGNAL_TOKEN",
-                    "feishu" => "FEISHU_APP_SECRET",
-                    "webhook" => "WEBHOOK_SECRET",
-                    _ => "PLATFORM_TOKEN",
-                };
                 append_env(env_key, &token)?;
                 selected.push(platform.to_string());
             }

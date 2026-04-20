@@ -68,7 +68,7 @@ pub fn cmd_insights(_days: usize, _source: Option<&str>) -> anyhow::Result<()> {
     // Source breakdown
     println!();
     println!("  {}", cyan().apply_to("By Source:"));
-    for source in &["cli", "telegram", "discord", "slack", "whatsapp", "signal"] {
+    for source in &["cli", "telegram", "discord", "slack", "whatsapp", "signal", "sms", "matrix", "mattermost", "homeassistant", "bluebubbles", "wecom_callback"] {
         if let Ok(count) = db.session_count(Some(source)) {
             if count > 0 {
                 println!("    {:20} {}", source, count);

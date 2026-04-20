@@ -745,7 +745,7 @@ async fn deliver_response(
 // ------------------------------------------------------------------
 
 /// Constant-time string comparison to prevent timing side-channels.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

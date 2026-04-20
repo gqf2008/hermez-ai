@@ -29,6 +29,8 @@ use crate::platforms::wecom::{WeComAdapter, WeComConfig};
 use crate::platforms::weixin::{WeixinAdapter, WeixinConfig, WeixinMessageEvent};
 use crate::platforms::qqbot::{QqbotAdapter, QqbotConfig, QqbotMessageEvent};
 use crate::platforms::whatsapp::{WhatsAppAdapter, WhatsAppConfig, WhatsAppMessageEvent};
+use crate::platforms::sms::{SmsAdapter, SmsConfig};
+use crate::platforms::matrix::{MatrixAdapter, MatrixConfig};
 
 /// Gateway configuration.
 #[derive(Debug, Clone)]
@@ -106,6 +108,8 @@ struct HealthCheckStatus {
     webhook: bool,
     qqbot: bool,
     email: bool,
+    sms: bool,
+    matrix: bool,
 }
 
 /// Health check HTTP handler.
@@ -125,6 +129,8 @@ async fn health_handler(
     platforms.insert("webhook".into(), serde_json::json!(status.webhook));
     platforms.insert("qqbot".into(), serde_json::json!(status.qqbot));
     platforms.insert("email".into(), serde_json::json!(status.email));
+    platforms.insert("sms".into(), serde_json::json!(status.sms));
+    platforms.insert("matrix".into(), serde_json::json!(status.matrix));
 
     let body = serde_json::json!({
         "status": if status.running.load(Ordering::SeqCst) { "ok" } else { "stopped" },
@@ -148,6 +154,8 @@ pub struct GatewayRunner {
     webhook_adapter: Option<Arc<WebhookAdapter>>,
     qqbot_adapter: Option<Arc<QqbotAdapter>>,
     email_adapter: Option<Arc<EmailAdapter>>,
+    sms_adapter: Option<Arc<SmsAdapter>>,
+    matrix_adapter: Option<Arc<MatrixAdapter>>,
     api_server_shutdown_tx: Vec<oneshot::Sender<()>>,
     dingtalk_shutdown_tx: Vec<oneshot::Sender<()>>,
     feishu_shutdown_tx: Vec<oneshot::Sender<()>>,
@@ -157,6 +165,8 @@ pub struct GatewayRunner {
     whatsapp_shutdown_tx: Vec<oneshot::Sender<()>>,
     webhook_shutdown_tx: Vec<oneshot::Sender<()>>,
     email_shutdown_tx: Vec<oneshot::Sender<()>>,
+    sms_shutdown_tx: Vec<oneshot::Sender<()>>,
+    // Matrix doesn't use oneshot shutdown — the sync loop checks running AtomicBool
     /// Health check server shutdown sender.
     health_check_shutdown_tx: Option<oneshot::Sender<()>>,
     message_handler: Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
@@ -189,6 +199,8 @@ impl GatewayRunner {
             webhook_adapter: None,
             qqbot_adapter: None,
             email_adapter: None,
+            sms_adapter: None,
+            matrix_adapter: None,
             api_server_shutdown_tx: Vec::new(),
             dingtalk_shutdown_tx: Vec::new(),
             feishu_shutdown_tx: Vec::new(),
@@ -198,6 +210,7 @@ impl GatewayRunner {
             whatsapp_shutdown_tx: Vec::new(),
             webhook_shutdown_tx: Vec::new(),
             email_shutdown_tx: Vec::new(),
+            sms_shutdown_tx: Vec::new(),
             health_check_shutdown_tx: None,
             message_handler: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -338,6 +351,24 @@ impl GatewayRunner {
                         warn!("Email enabled but not configured (missing EMAIL_ADDRESS/PASSWORD/IMAP/SMTP)");
                     }
                 }
+                Platform::Sms => {
+                    let sms_config = SmsConfig::from_env();
+                    if sms_config.is_configured() {
+                        info!("Initializing SMS adapter...");
+                        self.sms_adapter = Some(Arc::new(SmsAdapter::new(sms_config)));
+                    } else {
+                        warn!("SMS enabled but not configured (missing TWILIO_ACCOUNT_SID/TOKEN/PHONE_NUMBER)");
+                    }
+                }
+                Platform::Matrix => {
+                    let matrix_config = MatrixConfig::from_extra(&entry.config.extra);
+                    if matrix_config.is_configured() {
+                        info!("Initializing Matrix adapter...");
+                        self.matrix_adapter = Some(Arc::new(MatrixAdapter::new(matrix_config)));
+                    } else {
+                        warn!("Matrix enabled but not configured (missing MATRIX_HOMESERVER + access token or password)");
+                    }
+                }
                 _ => {
                     warn!("Platform {} not yet implemented in Rust", entry.platform.as_str());
                 }
@@ -356,12 +387,14 @@ impl GatewayRunner {
         let webhook_count = self.webhook_adapter.is_some() as usize;
         let qqbot_count = self.qqbot_adapter.is_some() as usize;
         let email_count = self.email_adapter.is_some() as usize;
+        let sms_count = self.sms_adapter.is_some() as usize;
+        let matrix_count = self.matrix_adapter.is_some() as usize;
         let feishu_webhook_count = self.feishu_adapter.as_ref()
             .map(|a| matches!(a.config.connection_mode, FeishuConnectionMode::Webhook))
             .unwrap_or(false) as usize;
         info!(
             "Gateway initialized: {} platform(s) ready",
-            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count
+            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count + sms_count + matrix_count
         );
         if feishu_webhook_count > 0 {
             info!("Feishu webhook: port={} path={}",
@@ -922,6 +955,49 @@ impl GatewayRunner {
             handles.push(handle);
         }
 
+        // Matrix: connect and start sync loop
+        if let Some(adapter) = &self.matrix_adapter {
+            let adapter = adapter.clone();
+            if let Err(e) = adapter.connect().await {
+                error!("Matrix connect failed: {e}");
+            } else {
+                let handler = self.message_handler.clone();
+                let running = self.running.clone();
+                let running_sessions = self.running_sessions.clone();
+                let busy_ack_ts = self.busy_ack_ts.clone();
+                let session_store = self.session_store.clone();
+                let default_model = self.config.default_model.clone();
+                let per_chat_model = self.per_chat_model.clone();
+                let handle = tokio::spawn(async move {
+                    adapter.run(handler, running, running_sessions, busy_ack_ts, session_store, default_model, per_chat_model).await;
+                });
+                handles.push(handle);
+            }
+        }
+
+        // SMS: start webhook server
+        if let Some(adapter) = &self.sms_adapter {
+            let adapter = adapter.clone();
+            let handler = self.message_handler.clone();
+            let running = self.running.clone();
+            let running_sessions = self.running_sessions.clone();
+            let busy_ack_ts = self.busy_ack_ts.clone();
+            let session_store = self.session_store.clone();
+            let default_model = self.config.default_model.clone();
+            let per_chat_model = self.per_chat_model.clone();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = adapter.run(
+                    handler, running, running_sessions, busy_ack_ts,
+                    session_store, shutdown_rx, default_model, per_chat_model,
+                ).await {
+                    error!("SMS webhook error: {e}");
+                }
+            });
+            self.sms_shutdown_tx.push(shutdown_tx);
+            handles.push(handle);
+        }
+
         // Email: connect and start polling loop
         if let Some(adapter) = &self.email_adapter {
             let adapter = adapter.clone();
@@ -964,6 +1040,8 @@ impl GatewayRunner {
             webhook: self.webhook_adapter.is_some(),
             qqbot: self.qqbot_adapter.is_some(),
             email: self.email_adapter.is_some(),
+            sms: self.sms_adapter.is_some(),
+            matrix: self.matrix_adapter.is_some(),
         };
         let (health_shutdown_tx, health_shutdown_rx) = oneshot::channel::<()>();
         let health_handle = tokio::spawn(async move {
@@ -1054,6 +1132,11 @@ impl GatewayRunner {
         for tx in senders {
             let _ = tx.send(());
         }
+        // Trigger SMS graceful shutdown
+        let senders = std::mem::take(&mut self.sms_shutdown_tx);
+        for tx in senders {
+            let _ = tx.send(());
+        }
         // Trigger Email graceful shutdown
         let senders = std::mem::take(&mut self.email_shutdown_tx);
         for tx in senders {
@@ -1095,6 +1178,8 @@ impl GatewayRunner {
             webhook_configured: self.webhook_adapter.is_some(),
             qqbot_configured: self.qqbot_adapter.is_some(),
             email_configured: self.email_adapter.is_some(),
+            sms_configured: self.sms_adapter.is_some(),
+            matrix_configured: self.matrix_adapter.is_some(),
             platform_count: self.config.platforms.iter().filter(|p| p.enabled).count(),
         }
     }
@@ -1116,6 +1201,8 @@ pub struct GatewayStatus {
     pub webhook_configured: bool,
     pub qqbot_configured: bool,
     pub email_configured: bool,
+    pub sms_configured: bool,
+    pub matrix_configured: bool,
     pub platform_count: usize,
 }
 
@@ -1892,6 +1979,20 @@ pub fn load_gateway_config() -> GatewayConfig {
                 config: PlatformConfig::default(),
             });
         }
+        if std::env::var("TWILIO_ACCOUNT_SID").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Sms,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
+        if std::env::var("MATRIX_HOMESERVER").is_ok() {
+            platforms.push(PlatformConfigEntry {
+                platform: Platform::Matrix,
+                enabled: true,
+                config: PlatformConfig::default(),
+            });
+        }
     }
 
     GatewayConfig {
@@ -2607,6 +2708,8 @@ mod tests {
             webhook: false,
             qqbot: false,
             email: false,
+            sms: false,
+            matrix: false,
         };
         // Verify clone works since HealthCheckStatus derives Clone
         let cloned = status.clone();

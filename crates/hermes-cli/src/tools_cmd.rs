@@ -487,7 +487,7 @@ pub fn cmd_tools_info(name: &str) -> anyhow::Result<()> {
 
         // Show which platforms have this toolset enabled
         println!("  {}:", style("Platforms").bold());
-        for platform in ["cli", "telegram", "discord", "feishu", "weixin", "slack", "whatsapp", "signal"] {
+        for platform in ["cli", "telegram", "discord", "feishu", "weixin", "slack", "whatsapp", "signal", "sms", "matrix", "mattermost", "homeassistant", "bluebubbles", "wecom_callback"] {
             let plat_enabled = get_enabled_toolsets(&config, platform);
             let status = if plat_enabled.contains(ts.key) {
                 style("✓").green()
