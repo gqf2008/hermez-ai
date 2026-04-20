@@ -786,6 +786,36 @@ fn detect_macos_system_proxy() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// UTF-16 length helpers
+// ---------------------------------------------------------------------------
+
+/// Return the UTF-16 code-unit length of a string.
+///
+/// Some platforms (e.g. Telegram) count message length in UTF-16 code units
+/// rather than Unicode scalar values or bytes.
+pub fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// Return the longest prefix of *s* whose UTF-16 length is <= *limit*.
+pub fn prefix_within_utf16_limit(s: &str, limit: usize) -> &str {
+    if utf16_len(s) <= limit {
+        return s;
+    }
+    let mut byte_idx = 0;
+    let mut units = 0;
+    for ch in s.chars() {
+        let ch_units = ch.encode_utf16(&mut [0; 2]).len();
+        if units + ch_units > limit {
+            break;
+        }
+        units += ch_units;
+        byte_idx += ch.len_utf8();
+    }
+    &s[..byte_idx]
+}
+
+// ---------------------------------------------------------------------------
 // Media type detection
 // ---------------------------------------------------------------------------
 
@@ -1083,5 +1113,25 @@ mod tests {
         // With no old files, cleanup should remove nothing
         let removed = cleanup_media_cache("images_test_empty", 0);
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_utf16_len() {
+        assert_eq!(utf16_len("hello"), 5);
+        assert_eq!(utf16_len("你好"), 2); // CJK = 1 UTF-16 unit each
+        assert_eq!(utf16_len("🎉"), 2); // emoji = surrogate pair = 2 UTF-16 units
+        assert_eq!(utf16_len(""), 0);
+    }
+
+    #[test]
+    fn test_prefix_within_utf16_limit() {
+        assert_eq!(prefix_within_utf16_limit("hello world", 100), "hello world");
+        assert_eq!(prefix_within_utf16_limit("hello world", 5), "hello");
+        // CJK chars
+        assert_eq!(prefix_within_utf16_limit("你好世界", 2), "你好");
+        // Emoji (2 UTF-16 units) — should be excluded if limit is 1
+        assert_eq!(prefix_within_utf16_limit("a🎉b", 1), "a");
+        // Emoji fits at limit 2
+        assert_eq!(prefix_within_utf16_limit("a🎉b", 3), "a🎉");
     }
 }
