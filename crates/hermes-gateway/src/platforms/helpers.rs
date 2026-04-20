@@ -6,7 +6,8 @@
 //! thread participation tracking, and phone number redaction.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::net::{IpAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -643,6 +644,271 @@ fn now_secs() -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// URL / Network helpers (mirrors Python base.py)
+// ---------------------------------------------------------------------------
+
+/// Return a URL string safe for logs (no query/fragment/userinfo).
+pub fn safe_url_for_log(url: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    if url.is_empty() {
+        return String::new();
+    }
+
+    let safe = match url.parse::<reqwest::Url>() {
+        Ok(parsed) if !parsed.host().is_none() => {
+            let netloc = parsed.host_str().unwrap_or("");
+            let base = format!("{}://{}", parsed.scheme(), netloc);
+            let path = parsed.path();
+            if !path.is_empty() && path != "/" {
+                if let Some(basename) = path.rsplit('/').next() {
+                    if !basename.is_empty() {
+                        format!("{}/.../{}", base, basename)
+                    } else {
+                        format!("{}/...", base)
+                    }
+                } else {
+                    format!("{}/...", base)
+                }
+            } else {
+                base
+            }
+        }
+        _ => url.to_string(),
+    };
+
+    if safe.len() <= max_len {
+        safe
+    } else if max_len <= 3 {
+        "...".to_string()
+    } else {
+        format!("{}...", &safe[..max_len - 3])
+    }
+}
+
+/// Return `true` if *host* would expose the server beyond loopback.
+///
+/// Loopback addresses are local-only. Unspecified addresses bind all
+/// interfaces. Hostnames are resolved; DNS failure fails closed (returns
+/// `true` to be permissive).
+pub fn is_network_accessible(host: &str) -> bool {
+    match host.parse::<IpAddr>() {
+        Ok(addr) => {
+            if addr.is_loopback() {
+                return false;
+            }
+            // IPv4-mapped loopback (::ffff:127.0.0.1)
+            if let IpAddr::V6(v6) = addr {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    if v4.is_loopback() {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        Err(_) => {
+            // Hostname — try to resolve
+            match (host, 0).to_socket_addrs() {
+                Ok(mut addrs) => addrs.any(|a| !a.ip().is_loopback()),
+                Err(_) => true, // DNS failure — fail permissive
+            }
+        }
+    }
+}
+
+/// Resolve proxy URL from environment variables or macOS system proxy.
+///
+/// Check order:
+/// 1. *platform_env_var* (e.g. `TELEGRAM_PROXY`) — highest priority
+/// 2. `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (and lowercase variants)
+/// 3. macOS system proxy via `scutil --proxy` (auto-detect)
+pub fn resolve_proxy_url(platform_env_var: Option<&str>) -> Option<String> {
+    if let Some(var) = platform_env_var {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+
+    for key in [
+        "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+        "https_proxy", "http_proxy", "all_proxy",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(proxy) = detect_macos_system_proxy() {
+            return Some(proxy);
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_system_proxy() -> Option<String> {
+    let output = std::process::Command::new("scutil")
+        .args(["--proxy"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut props = HashMap::new();
+    for line in text.lines() {
+        if let Some((key, val)) = line.split_once(" : ") {
+            props.insert(key.trim(), val.trim());
+        }
+    }
+    for (enable_key, host_key, port_key) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if props.get(enable_key) == Some(&"1") {
+            let host = props.get(host_key).copied()?;
+            let port = props.get(port_key).copied()?;
+            return Some(format!("http://{}:{}", host, port));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Media type detection
+// ---------------------------------------------------------------------------
+
+/// Return `true` if *data* starts with a known image magic-byte sequence.
+pub fn looks_like_image(data: &[u8]) -> bool {
+    if data.len() < 2 {
+        return false;
+    }
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return true;
+    }
+    if data.starts_with(b"\xff\xd8\xff") {
+        return true;
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return true;
+    }
+    if data.starts_with(b"BM") {
+        return true;
+    }
+    if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Media cache utilities
+// ---------------------------------------------------------------------------
+
+fn media_cache_dir(subdir: &str) -> PathBuf {
+    let dir = hermes_core::get_hermes_home().join("cache").join(subdir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Save raw image bytes to the cache and return the absolute file path.
+///
+/// Returns an error if *data* does not look like a valid image.
+pub fn cache_image_from_bytes(data: &[u8], ext: &str) -> Result<PathBuf, String> {
+    if !looks_like_image(data) {
+        let snippet = String::from_utf8_lossy(&data[..data.len().min(80)]);
+        return Err(format!(
+            "Refusing to cache non-image data as {ext} (starts with: {snippet:?})"
+        ));
+    }
+    let cache_dir = media_cache_dir("images");
+    let filename = format!("img_{}{ext}", uuid::Uuid::new_v4().simple());
+    let filepath = cache_dir.join(&filename);
+    std::fs::write(&filepath, data).map_err(|e| format!("Failed to write image cache: {e}"))?;
+    Ok(filepath)
+}
+
+/// Save raw audio bytes to the cache and return the absolute file path.
+pub fn cache_audio_from_bytes(data: &[u8], ext: &str) -> Result<PathBuf, String> {
+    let cache_dir = media_cache_dir("audio");
+    let filename = format!("audio_{}{ext}", uuid::Uuid::new_v4().simple());
+    let filepath = cache_dir.join(&filename);
+    std::fs::write(&filepath, data).map_err(|e| format!("Failed to write audio cache: {e}"))?;
+    Ok(filepath)
+}
+
+/// Save raw document bytes to the cache and return the absolute file path.
+///
+/// The cached filename preserves the original human-readable name with a
+/// unique prefix: `doc_{uuid12}_{original_filename}`.
+pub fn cache_document_from_bytes(data: &[u8], filename: &str) -> Result<PathBuf, String> {
+    let cache_dir = media_cache_dir("documents");
+    let safe_name = Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document")
+        .replace('\x00', "")
+        .trim()
+        .to_string();
+    let safe_name = if safe_name.is_empty() || safe_name == "." || safe_name == ".." {
+        "document".to_string()
+    } else {
+        safe_name
+    };
+    let cached_name = format!("doc_{}_{safe_name}", uuid::Uuid::new_v4().simple());
+    let filepath = cache_dir.join(&cached_name);
+    // Safety check: ensure path stays inside cache dir
+    if !filepath
+        .canonicalize()
+        .unwrap_or_else(|_| filepath.clone())
+        .starts_with(&cache_dir.canonicalize().unwrap_or_else(|_| cache_dir.clone()))
+    {
+        return Err(format!("Path traversal rejected: {filename:?}"));
+    }
+    std::fs::write(&filepath, data).map_err(|e| format!("Failed to write document cache: {e}"))?;
+    Ok(filepath)
+}
+
+/// Delete cached files older than *max_age_hours* from a cache directory.
+///
+/// Returns the number of files removed.
+pub fn cleanup_media_cache(subdir: &str, max_age_hours: u64) -> usize {
+    let cache_dir = hermes_core::get_hermes_home().join("cache").join(subdir);
+    let cutoff = now_secs() - (max_age_hours as f64 * 3600.0);
+    let mut removed = 0;
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    if let Ok(mtime) = meta.modified() {
+                        let mtime_secs = mtime
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64();
+                        if mtime_secs < cutoff {
+                            let _ = std::fs::remove_file(entry.path());
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -746,5 +1012,76 @@ mod tests {
             4000,
         );
         assert!(agg.is_enabled());
+    }
+
+    #[test]
+    fn test_safe_url_for_log() {
+        assert_eq!(
+            safe_url_for_log("https://user:pass@example.com/path/to/file.jpg?token=secret", 80),
+            "https://example.com/.../file.jpg"
+        );
+        assert_eq!(
+            safe_url_for_log("https://example.com/", 30),
+            "https://example.com"
+        );
+        assert_eq!(
+            safe_url_for_log("not-a-url", 10),
+            "not-a-url"
+        );
+        assert_eq!(safe_url_for_log("", 10), "");
+        assert_eq!(safe_url_for_log("https://example.com/very/long/path", 20), "https://example.c...");
+    }
+
+    #[test]
+    fn test_is_network_accessible() {
+        assert!(!is_network_accessible("127.0.0.1"));
+        assert!(!is_network_accessible("::1"));
+        assert!(is_network_accessible("8.8.8.8"));
+        assert!(is_network_accessible("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_looks_like_image() {
+        assert!(looks_like_image(b"\x89PNG\r\n\x1a\n"));
+        assert!(looks_like_image(b"\xff\xd8\xff"));
+        assert!(looks_like_image(b"GIF87a"));
+        assert!(looks_like_image(b"GIF89a"));
+        assert!(looks_like_image(b"BM"));
+        assert!(looks_like_image(b"RIFFxxxxWEBP"));
+        assert!(!looks_like_image(b"<html>"));
+        assert!(!looks_like_image(b""));
+    }
+
+    #[test]
+    fn test_cache_image_from_bytes() {
+        let png = b"\x89PNG\r\n\x1a\nfake_png_data";
+        let path = cache_image_from_bytes(png, ".png").unwrap();
+        assert!(path.exists());
+        assert!(path.to_string_lossy().ends_with(".png"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_cache_image_rejects_non_image() {
+        let result = cache_image_from_bytes(b"<html>not an image</html>", ".jpg");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cache_document_from_bytes() {
+        let data = b"hello world";
+        let path = cache_document_from_bytes(data, "report.pdf").unwrap();
+        assert!(path.exists());
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("doc_"));
+        assert!(name.ends_with("_report.pdf"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_media_cache_no_old_files() {
+        // With no old files, cleanup should remove nothing
+        let removed = cleanup_media_cache("images_test_empty", 0);
+        assert_eq!(removed, 0);
     }
 }
