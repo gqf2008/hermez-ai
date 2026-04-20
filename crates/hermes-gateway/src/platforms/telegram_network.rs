@@ -192,17 +192,16 @@ impl TelegramFallbackClient {
     /// Create a new fallback client.
     ///
     /// `timeout` is applied to every underlying `reqwest::Client`.
+    /// Automatically detects HTTP/HTTPS proxy from `TELEGRAM_PROXY`,
+    /// `HTTPS_PROXY`, `HTTP_PROXY`, or macOS system settings.
     pub fn new(timeout: Duration, fallback_ips: Vec<String>) -> reqwest::Result<Self> {
-        let primary = Client::builder().timeout(timeout).build()?;
+        let proxy_url = crate::platforms::helpers::resolve_proxy_url(Some("TELEGRAM_PROXY"));
+        let primary = Self::_build_client(timeout, None, proxy_url.as_deref())?;
 
         let mut fallbacks = HashMap::new();
         for ip in &fallback_ips {
             if let Ok(addr) = format!("{ip}:443").parse::<SocketAddr>() {
-                match Client::builder()
-                    .timeout(timeout)
-                    .resolve_to_addrs(TELEGRAM_API_HOST, &[addr])
-                    .build()
-                {
+                match Self::_build_client(timeout, Some(addr), proxy_url.as_deref()) {
                     Ok(c) => {
                         fallbacks.insert(ip.clone(), c);
                     }
@@ -219,6 +218,29 @@ impl TelegramFallbackClient {
             sticky_ip: RwLock::new(None),
             fallback_ips,
         })
+    }
+
+    fn _build_client(
+        timeout: Duration,
+        resolve_addr: Option<SocketAddr>,
+        proxy_url: Option<&str>,
+    ) -> reqwest::Result<Client> {
+        let mut builder = Client::builder().timeout(timeout);
+        if let Some(url) = proxy_url {
+            match reqwest::Proxy::all(url) {
+                Ok(proxy) => {
+                    builder = builder.proxy(proxy);
+                    info!("[Telegram] Using proxy: {url}");
+                }
+                Err(e) => {
+                    warn!("[Telegram] Invalid proxy URL {url}: {e}");
+                }
+            }
+        }
+        if let Some(addr) = resolve_addr {
+            builder = builder.resolve_to_addrs(TELEGRAM_API_HOST, &[addr]);
+        }
+        builder.build()
     }
 
     /// Start building a GET request.
