@@ -1165,6 +1165,243 @@ impl DiscordAdapter {
         Ok(())
     }
 
+    /// Send an image from a URL as a Discord file attachment.
+    pub async fn send_image(
+        &self,
+        channel_id: &str,
+        image_url: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        info!("Discord send_image to {channel_id}: {image_url}");
+
+        let resp = self
+            .client
+            .get(image_url)
+            .send()
+            .await
+            .map_err(|e| format!("download image failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("download image failed: HTTP {}", resp.status()));
+        }
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/png");
+
+        let ext = if content_type.contains("jpeg") || content_type.contains("jpg") {
+            "jpg"
+        } else if content_type.contains("gif") {
+            "gif"
+        } else if content_type.contains("webp") {
+            "webp"
+        } else {
+            "png"
+        };
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("read image bytes failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes.to_vec(), &format!("image.{ext}"), caption, reply_to)
+            .await
+    }
+
+    /// Send a local image file as a Discord attachment.
+    pub async fn send_image_file(
+        &self,
+        channel_id: &str,
+        image_path: &std::path::Path,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        let file_name = image_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image.png")
+            .to_string();
+
+        let bytes = tokio::fs::read(image_path)
+            .await
+            .map_err(|e| format!("read image file failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes, &file_name, caption, reply_to)
+            .await
+    }
+
+    /// Send a document/file as a Discord attachment.
+    pub async fn send_document(
+        &self,
+        channel_id: &str,
+        file_path: &std::path::Path,
+        caption: Option<&str>,
+        file_name: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        let name = file_name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string()
+            });
+
+        let bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| format!("read document failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes, &name, caption, reply_to)
+            .await
+    }
+
+    /// Send a voice/audio file as a Discord attachment.
+    /// Discord does not have native voice message support via REST;
+    /// the file is uploaded as a regular audio attachment.
+    pub async fn send_voice(
+        &self,
+        channel_id: &str,
+        audio_path: &std::path::Path,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        let file_name = audio_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("voice.ogg")
+            .to_string();
+
+        let bytes = tokio::fs::read(audio_path)
+            .await
+            .map_err(|e| format!("read voice file failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes, &file_name, caption, reply_to)
+            .await
+    }
+
+    /// Send a local video file as a Discord attachment.
+    pub async fn send_video(
+        &self,
+        channel_id: &str,
+        video_path: &std::path::Path,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        let file_name = video_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video.mp4")
+            .to_string();
+
+        let bytes = tokio::fs::read(video_path)
+            .await
+            .map_err(|e| format!("read video file failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes, &file_name, caption, reply_to)
+            .await
+    }
+
+    /// Send an animation (GIF) from a URL as a Discord file attachment.
+    pub async fn send_animation(
+        &self,
+        channel_id: &str,
+        animation_url: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        if self.config.bot_token.is_empty() {
+            return Err("Discord bot_token not configured".to_string());
+        }
+
+        info!("Discord send_animation to {channel_id}: {animation_url}");
+
+        let resp = self
+            .client
+            .get(animation_url)
+            .send()
+            .await
+            .map_err(|e| format!("download animation failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("download animation failed: HTTP {}", resp.status()));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("read animation bytes failed: {e}"))?;
+
+        self.send_file_bytes(channel_id, bytes.to_vec(), "animation.gif", caption, reply_to)
+            .await
+    }
+
+    /// Helper: send raw file bytes as a Discord attachment.
+    async fn send_file_bytes(
+        &self,
+        channel_id: &str,
+        file_bytes: Vec<u8>,
+        file_name: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let part = multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string());
+
+        let mut payload = serde_json::json!({
+            "content": caption.unwrap_or(""),
+            "allowed_mentions": self.allowed_mentions.to_json(),
+        });
+        if let Some(reply_id) = reply_to {
+            payload["message_reference"] = serde_json::json!({ "message_id": reply_id });
+        }
+
+        let form = multipart::Form::new()
+            .part("file", part)
+            .text("payload_json", payload.to_string());
+
+        let url = format!("{API_BASE}/channels/{channel_id}/messages");
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("send file request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord API error {status}: {err_body}"));
+        }
+        Ok(())
+    }
+
     async fn send_message(
         &self,
         channel_id: &str,

@@ -21,7 +21,7 @@ use axum::{
     http::StatusCode,
     routing::post,
 };
-use reqwest::Client;
+use crate::platforms::telegram_network::{parse_fallback_ip_env, TelegramFallbackClient};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -131,7 +131,7 @@ pub struct TelegramMessageEvent {
 /// Telegram platform adapter.
 pub struct TelegramAdapter {
     pub config: TelegramConfig,
-    client: Client,
+    client: TelegramFallbackClient,
     /// Monotonically increasing offset for long-poll.
     offset: AtomicU64,
     /// Deduplication cache.
@@ -148,13 +148,21 @@ impl TelegramAdapter {
     pub fn new(config: TelegramConfig) -> Self {
         let api_url = format!("{API_BASE}{}", config.bot_token);
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-                .build()
+            client: {
+                let fallback_ips = parse_fallback_ip_env();
+                TelegramFallbackClient::new(
+                    Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                    fallback_ips,
+                )
                 .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to build HTTP client: {e}");
-                    Client::new()
-                }),
+                    tracing::warn!("Failed to build TelegramFallbackClient: {e}; using no fallback");
+                    TelegramFallbackClient::new(
+                        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                        vec![],
+                    )
+                    .expect("TelegramFallbackClient with no fallbacks should always build")
+                })
+            },
             offset: AtomicU64::new(0),
             dedup: Arc::new(MessageDeduplicator::with_params(300, 2000)),
             api_url,

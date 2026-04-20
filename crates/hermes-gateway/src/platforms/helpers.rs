@@ -396,6 +396,242 @@ pub fn redact_phone(phone: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Media extraction (ported from Python base.py)
+// ---------------------------------------------------------------------------
+
+/// Extract image URLs from markdown `![alt](url)` and HTML `<img src="url">` tags.
+///
+/// Returns `(list of (url, alt_text), cleaned_content)`.
+pub fn extract_images(content: &str) -> (Vec<(String, String)>, String) {
+    let mut images = Vec::new();
+    let mut cleaned = content.to_string();
+
+    // Markdown images: ![alt](url)
+    static MD_IMG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let md_re = MD_IMG.get_or_init(|| {
+        regex::Regex::new(r"!\[([^\]]*)\]\((https?://[^\s\)]+)\)").unwrap()
+    });
+
+    for cap in md_re.captures_iter(content) {
+        let alt = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+        let url = cap.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+        let lower = url.to_lowercase();
+        if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+            || lower.ends_with(".webp")
+            || lower.contains("fal.media")
+            || lower.contains("fal-cdn")
+            || lower.contains("replicate.delivery")
+        {
+            images.push((url.clone(), alt));
+        }
+    }
+
+    // HTML img tags
+    static HTML_IMG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let html_re = HTML_IMG.get_or_init(|| {
+        regex::Regex::new(r#"<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?"#).unwrap()
+    });
+
+    for cap in html_re.captures_iter(content) {
+        if let Some(url) = cap.get(1) {
+            images.push((url.as_str().to_string(), String::new()));
+        }
+    }
+
+    if !images.is_empty() {
+        let extracted: std::collections::HashSet<String> = images.iter().map(|(u, _)| u.clone()).collect();
+        cleaned = md_re.replace_all(&cleaned, |caps: &regex::Captures| {
+            let url = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            if extracted.contains(url) { "".to_string() } else { caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string() }
+        }).into_owned();
+        cleaned = html_re.replace_all(&cleaned, |caps: &regex::Captures| {
+            let url = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if extracted.contains(url) { "".to_string() } else { caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string() }
+        }).into_owned();
+        cleaned = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&cleaned, "\n\n").into_owned();
+        cleaned = cleaned.trim().to_string();
+    }
+
+    (images, cleaned)
+}
+
+/// Extract `MEDIA:<path>` tags and `[[audio_as_voice]]` directives from text.
+///
+/// Returns `(list of (path, is_voice), cleaned_content)`.
+pub fn extract_media(content: &str) -> (Vec<(String, bool)>, String) {
+    let has_voice_tag = content.contains("[[audio_as_voice]]");
+    let mut cleaned = content.replace("[[audio_as_voice]]", "");
+
+    static MEDIA_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let media_re = MEDIA_RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a)(?=[\s`"',;:)\]}]|$)|\S+)[`"']?"#
+        ).unwrap()
+    });
+
+    let mut media = Vec::new();
+    for cap in media_re.captures_iter(content) {
+        if let Some(path_match) = cap.name("path") {
+            let mut path = path_match.as_str().trim().to_string();
+            // Strip surrounding quotes/backticks
+            if path.len() >= 2 {
+                let first = path.chars().next().unwrap();
+                let last = path.chars().last().unwrap();
+                if first == last && (first == '`' || first == '"' || first == '\'') {
+                    path = path[1..path.len()-1].trim().to_string();
+                }
+            }
+            path = path.trim_start_matches("`\"'").trim_end_matches("`\"',.;:)}]").to_string();
+            if !path.is_empty() {
+                media.push((path, has_voice_tag));
+            }
+        }
+    }
+
+    if !media.is_empty() {
+        cleaned = media_re.replace_all(&cleaned, "").into_owned();
+        cleaned = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&cleaned, "\n\n").into_owned();
+        cleaned = cleaned.trim().to_string();
+    }
+
+    (media, cleaned)
+}
+
+/// Detect bare local file paths in response text for native media delivery.
+///
+/// Matches absolute paths (`/...`) and tilde paths (`~/...`) ending in
+/// common image or video extensions. Ignores paths inside code blocks.
+///
+/// Returns `(list of expanded file paths, cleaned_text)`.
+pub fn extract_local_files(content: &str) -> (Vec<String>, String) {
+    static PATH_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let path_re = PATH_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpg|jpeg|gif|webp|mp4|mov|avi|mkv|webm)\b"
+        ).unwrap()
+    });
+
+    // Collect code block spans
+    let mut code_spans: Vec<(usize, usize)> = Vec::new();
+    static FENCE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let fence_re = FENCE_RE.get_or_init(|| regex::Regex::new(r"```[^\n]*\n.*?```").unwrap());
+    for m in fence_re.find_iter(content) {
+        code_spans.push((m.start(), m.end()));
+    }
+    static INLINE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let inline_re = INLINE_RE.get_or_init(|| regex::Regex::new(r"`[^`\n]+`").unwrap());
+    for m in inline_re.find_iter(content) {
+        code_spans.push((m.start(), m.end()));
+    }
+
+    fn in_code(pos: usize, spans: &[(usize, usize)]) -> bool {
+        spans.iter().any(|(s, e)| *s <= pos && pos < *e)
+    }
+
+    let mut found: Vec<(String, String)> = Vec::new(); // (raw, expanded)
+    for m in path_re.find_iter(content) {
+        if in_code(m.start(), &code_spans) {
+            continue;
+        }
+        let raw = m.as_str().to_string();
+        let expanded = if raw.starts_with("~/") {
+            std::env::var("HOME")
+                .map(|h| std::path::Path::new(&h).join(&raw[2..]).to_string_lossy().into_owned())
+                .unwrap_or_else(|_| raw.clone())
+        } else {
+            raw.clone()
+        };
+        found.push((raw, expanded));
+    }
+
+    let mut cleaned = content.to_string();
+    for (raw, _) in &found {
+        cleaned = cleaned.replace(raw, "");
+    }
+    cleaned = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&cleaned, "\n\n").into_owned();
+    cleaned = cleaned.trim().to_string();
+
+    let paths: Vec<String> = found.into_iter().map(|(_, p)| p).collect();
+    (paths, cleaned)
+}
+
+/// Truncate a long message into chunks, preserving code block boundaries.
+///
+/// When a split falls inside a triple-backtick code block, the fence is
+/// closed at the end of the current chunk and reopened at the start of the next.
+pub fn truncate_message(content: &str, max_length: usize) -> Vec<String> {
+    if content.len() <= max_length {
+        return vec![content.to_string()];
+    }
+
+    const INDICATOR_RESERVE: usize = 10; // room for " (XX/XX)"
+    const FENCE_CLOSE: &str = "\n```";
+
+    let mut chunks = Vec::new();
+    let mut remaining = content;
+    let mut carry_lang: Option<String> = None;
+
+    while !remaining.is_empty() {
+        let prefix = match &carry_lang {
+            Some(lang) => format!("```{lang}\n"),
+            None => String::new(),
+        };
+
+        let headroom = max_length.saturating_sub(INDICATOR_RESERVE + prefix.len() + FENCE_CLOSE.len());
+        let headroom = headroom.max(max_length / 2);
+
+        if prefix.len() + remaining.len() <= max_length - INDICATOR_RESERVE {
+            chunks.push(prefix + remaining);
+            break;
+        }
+
+        let region = &remaining[..headroom.min(remaining.len())];
+        let mut split_at = region.rfind('\n').unwrap_or(0);
+        if split_at < headroom / 2 {
+            split_at = region.rfind(' ').unwrap_or(0);
+        }
+        if split_at < 1 {
+            split_at = headroom;
+        }
+
+        let mut chunk = prefix + &remaining[..split_at];
+        remaining = &remaining[split_at..];
+
+        // Detect if we're inside a code block
+        let fence_open = regex::Regex::new(r"```(\w*)").unwrap();
+        let opens: Vec<_> = fence_open.find_iter(&chunk).collect();
+        let _closes = chunk.matches("```").count();
+        let open_count = opens.len();
+        let in_block = open_count % 2 == 1;
+
+        if in_block {
+            let lang = opens.last().and_then(|m| {
+                fence_open.captures(m.as_str()).and_then(|c| c.get(1).map(|g| g.as_str().to_string()))
+            });
+            chunk.push_str(FENCE_CLOSE);
+            carry_lang = lang;
+        } else {
+            carry_lang = None;
+        }
+
+        chunks.push(chunk);
+    }
+
+    // Add chunk indicators
+    let total = chunks.len();
+    if total > 1 {
+        for (i, chunk) in chunks.iter_mut().enumerate() {
+            *chunk = format!("{} ({}/{total})", chunk.trim_end(), i + 1);
+        }
+    }
+
+    chunks
+}
+
+// ---------------------------------------------------------------------------
 // Internal utilities
 // ---------------------------------------------------------------------------
 
