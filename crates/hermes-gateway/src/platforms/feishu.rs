@@ -2261,6 +2261,20 @@ impl FeishuAdapter {
                     }
                 }
             }
+            "drive.notice.comment_add_v1" => {
+                match self.get_access_token().await {
+                    Ok(token) => {
+                        let client = &self.client;
+                        let self_open_id = &self.config.bot_open_id;
+                        crate::platforms::feishu_comment::handle_drive_comment_event(
+                            client, &token, &event, self_open_id,
+                        ).await;
+                    }
+                    Err(e) => {
+                        warn!("[Feishu WS] Cannot handle comment event: failed to get access token: {e}");
+                    }
+                }
+            }
             "im.message.message_read_v1" => {
                 debug!("[Feishu WS] Message read event");
             }
