@@ -222,6 +222,26 @@ async fn api_session_create(Json(body): Json<serde_json::Value>) -> Json<serde_j
     Json(result)
 }
 
+fn build_agent_config(id: &str) -> hermes_agent_engine::AgentConfig {
+    match hermes_core::HermesConfig::load() {
+        Ok(cfg) => {
+            let mut c = hermes_agent_engine::AgentConfig::default();
+            c.model = cfg.model.name.unwrap_or(c.model);
+            c.provider = cfg.model.provider;
+            c.base_url = cfg.model.base_url;
+            c.api_key = cfg.model.api_key;
+            c.api_mode = cfg.model.api_mode;
+            c.session_id = Some(id.to_string());
+            c
+        }
+        Err(_) => {
+            let mut c = hermes_agent_engine::AgentConfig::default();
+            c.session_id = Some(id.to_string());
+            c
+        }
+    }
+}
+
 async fn api_chat(
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
@@ -232,22 +252,7 @@ async fn api_chat(
     }
     let system = body.get("system_prompt").and_then(|v| v.as_str());
 
-    let config = match hermes_core::HermesConfig::load() {
-        Ok(cfg) => {
-            let mut c = hermes_agent_engine::AgentConfig::default();
-            c.model = cfg.model.name.unwrap_or(c.model);
-            c.provider = cfg.model.provider;
-            c.base_url = cfg.model.base_url;
-            c.api_key = cfg.model.api_key;
-            c.session_id = Some(id.clone());
-            c
-        }
-        Err(_) => {
-            let mut c = hermes_agent_engine::AgentConfig::default();
-            c.session_id = Some(id.clone());
-            c
-        }
-    };
+    let config = build_agent_config(&id);
 
     let home = hermes_core::hermes_home::get_hermes_home();
     let db_path = home.join("sessions.db");
@@ -321,22 +326,7 @@ async fn api_chat_stream(
             return;
         }
 
-        let config = match hermes_core::HermesConfig::load() {
-            Ok(cfg) => {
-                let mut c = hermes_agent_engine::AgentConfig::default();
-                c.model = cfg.model.name.unwrap_or(c.model);
-                c.provider = cfg.model.provider;
-                c.base_url = cfg.model.base_url;
-                c.api_key = cfg.model.api_key;
-                c.session_id = Some(id.clone());
-                c
-            }
-            Err(_) => {
-                let mut c = hermes_agent_engine::AgentConfig::default();
-                c.session_id = Some(id.clone());
-                c
-            }
-        };
+        let config = build_agent_config(&id);
 
         let home = hermes_core::hermes_home::get_hermes_home();
         let db_path = home.join("sessions.db");

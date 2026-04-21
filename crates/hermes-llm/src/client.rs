@@ -115,18 +115,22 @@ pub enum LlmStreamEvent {
     /// A complete tool_call has been assembled.
     ToolCall { id: String, name: String, arguments: String },
     /// Stream completed successfully.
-    Done { usage: Option<UsageInfo> },
+    Done { usage: Option<UsageInfo>, finish_reason: Option<String> },
     /// Terminal error.
     Error { message: String },
 }
 
 /// Dispatch to the correct provider API based on `api_mode` or model prefix.
 pub async fn call_llm(request: LlmRequest) -> Result<LlmResponse, ClassifiedError> {
+    tracing::debug!("call_llm: model={}, api_mode={:?}", request.model, request.api_mode);
     // api_mode takes precedence over model-prefix detection
     if let Some(ref mode) = request.api_mode {
         match mode.as_str() {
             "codex" | "codex_responses" => return call_codex(&request).await,
-            "anthropic" | "anthropic_messages" => return call_anthropic(&request).await,
+            "anthropic" | "anthropic_messages" => {
+                tracing::debug!("call_llm: routing to call_anthropic");
+                return call_anthropic(&request).await;
+            }
             _ => {} // fall through to provider detection
         }
     }
@@ -186,6 +190,10 @@ async fn call_llm_stream_inner(
         match mode.as_str() {
             "codex" | "codex_responses" => {
                 let s = call_codex_stream(&request).await?;
+                return Ok(Box::new(s));
+            }
+            "anthropic" | "anthropic_messages" => {
+                let s = call_anthropic_stream(&request).await?;
                 return Ok(Box::new(s));
             }
             _ => {}
@@ -452,7 +460,7 @@ async fn call_openai_compat_stream(
                         Some(c) => c,
                         None => {
                             if usage.is_some() {
-                                let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
+                                let _ = tx.unbounded_send(LlmStreamEvent::Done { usage, finish_reason: None });
                             }
                             continue;
                         }
@@ -497,9 +505,8 @@ async fn call_openai_compat_stream(
 
                     // Finish reason
                     if let Some(ref finish) = choice.finish_reason {
-                        if matches!(finish, async_openai::types::FinishReason::Stop) {
-                            let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
-                        } else if matches!(finish, async_openai::types::FinishReason::ToolCalls) {
+                        let fr = serde_json::to_value(finish).map(|v| v.to_string()).ok();
+                        if matches!(finish, async_openai::types::FinishReason::ToolCalls) {
                             let mut sorted: Vec<_> = tc_state.drain().collect();
                             sorted.sort_by_key(|(k, _)| *k);
                             for (_, partial) in sorted {
@@ -511,10 +518,10 @@ async fn call_openai_compat_stream(
                                     });
                                 }
                             }
-                            let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
                         }
+                        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage, finish_reason: fr });
                     } else if usage.is_some() {
-                        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
+                        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage, finish_reason: None });
                     }
                 }
                 Err(e) => {
@@ -723,10 +730,10 @@ async fn call_codex_stream(
             LlmStreamEvent::ToolCall { id: call_id, name, arguments }
         }
         crate::codex::CodexStreamEvent::ResponseCompleted { .. } => {
-            LlmStreamEvent::Done { usage: None }
+            LlmStreamEvent::Done { usage: None, finish_reason: Some("stop".to_string()) }
         }
         crate::codex::CodexStreamEvent::ResponseIncomplete { .. } => {
-            LlmStreamEvent::Done { usage: None }
+            LlmStreamEvent::Done { usage: None, finish_reason: None }
         }
         crate::codex::CodexStreamEvent::ResponseFailed { response } => {
             let msg = response.get("error")
@@ -827,99 +834,64 @@ async fn send_openrouter_with_provider_prefs(
 
 /// Call Anthropic Messages API.
 async fn call_anthropic(request: &LlmRequest) -> Result<LlmResponse, ClassifiedError> {
-    // Resolve API key: request > credential pool > env
-    let api_key = request.api_key.clone()
-        .or_else(|| resolve_api_key_from_pool("anthropic"))
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .unwrap_or_default();
-    let base_url = request.base_url.clone()
-        .map(|u| crate::auxiliary_client::to_openai_base_url(&u))
-        .or_else(|| resolve_base_url_from_pool("anthropic"))
-        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok().map(|u| crate::auxiliary_client::to_openai_base_url(&u)));
+    // Some proxies (e.g. cc-switch) only accept streaming Anthropic requests and
+    // drop non-streaming ones. We always use the streaming path internally and
+    // collect the deltas into a single LlmResponse.
+    let mut stream = call_anthropic_stream(request).await?;
 
-    // Convert messages using the Anthropic adapter
-    let (system_prompt, messages) = crate::anthropic::convert_messages(&request.messages, true);
+    let mut content_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut usage: Option<UsageInfo> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut error_message: Option<String> = None;
 
-    let builder = crate::anthropic::AnthropicRequestBuilder {
-        model: request.model.clone(),
-        messages,
-        system_prompt,
-        max_tokens: request.max_tokens.unwrap_or(
-            crate::anthropic::get_anthropic_max_output(&request.model),
-        ),
-        temperature: request.temperature,
-        tools: request.tools.clone(),
-        api_key,
-        base_url,
-        thinking_enabled: false,
-        thinking_effort: None,
-        fast_mode: false,
-        stream: false,
-    };
-
-    let (body_str, headers, url) = builder.build();
-    let timeout_secs = request.timeout_secs.unwrap_or(300);
-
-    // Retry config for transport resilience
-    let retry_config = RetryConfig {
-        max_retries: 2,
-        base_delay: Duration::from_millis(500),
-        max_delay: Duration::from_secs(5),
-        jitter: true,
-    };
-
-    let (status, text) = retry_with_backoff(&retry_config, |attempt| {
-        let body_str = body_str.clone();
-        let headers = headers.clone();
-        let url = url.clone();
-        let model = request.model.clone();
-        async move {
-            // Set default user-agent at the client level to avoid empty user-agent
-            // issues with some proxies. The headers HashMap may override this.
-            let client = HttpClient::builder()
-                .user_agent("reqwest/0.12.12")
-                .timeout(Duration::from_secs(timeout_secs))
-                .build()
-                .map_err(|e| classify_api_error("anthropic", &model, None,
-                    &format!("Failed to build HTTP client: {e}")))?;
-
-            let mut req = client.post(&url);
-            for (key, value) in &headers {
-                req = req.header(key, value);
+    while let Some(evt) = stream.next().await {
+        match evt {
+            LlmStreamEvent::TextDelta { delta } => content_parts.push(delta),
+            LlmStreamEvent::ReasoningDelta { delta } => reasoning_parts.push(delta),
+            LlmStreamEvent::ToolCall { id, name, arguments } => {
+                tool_calls.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": serde_json::from_str(&arguments).unwrap_or(json!({})),
+                    }
+                }));
             }
-
-            if attempt == 0 {
-                tracing::debug!("Anthropic request: model={}, url={}, body_size={}",
-                    model, url, body_str.len());
+            LlmStreamEvent::Done { usage: u, finish_reason: fr } => {
+                usage = u;
+                finish_reason = fr;
             }
-
-            let resp = req.body(body_str).send().await.map_err(|e| {
-                classify_api_error("anthropic", &model, None, &format!("Request failed: {e}"))
-            })?;
-
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-
-            // Only retry on transport errors (5xx / timeout / connection issues)
-            if status >= 500 || status == 429 || status == 408 {
-                return Err(classify_api_error("anthropic", &model, Some(status), &text));
+            LlmStreamEvent::Error { message } => {
+                error_message = Some(message);
+                break;
             }
-
-            Ok((status, text))
+            _ => {}
         }
-    }).await?;
-
-    if status >= 400 {
-        return Err(classify_api_error("anthropic", &request.model,
-            Some(status), &text));
     }
 
-    let json: Value = serde_json::from_str(&text).map_err(|e| {
-        classify_api_error("anthropic", &request.model, Some(status),
-            &format!("Failed to parse response: {e}"))
-    })?;
+    if let Some(msg) = error_message {
+        return Err(classify_api_error("anthropic", &request.model, None, &msg));
+    }
 
-    parse_anthropic_response(&json, &request.model)
+    let mut content = if content_parts.is_empty() { None } else { Some(content_parts.join("")) };
+    if !reasoning_parts.is_empty() {
+        let thinking = format!("<thinking>\n{}\n</thinking>", reasoning_parts.join(""));
+        content = Some(match content {
+            Some(text) => format!("{thinking}\n\n{text}"),
+            None => thinking,
+        });
+    }
+
+    Ok(LlmResponse {
+        content,
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        model: request.model.clone(),
+        usage,
+        finish_reason,
+    })
 }
 
 /// Streaming variant of `call_anthropic`.
@@ -961,6 +933,8 @@ async fn call_anthropic_stream(
     let (body_str, headers, url) = builder.build();
     let timeout_secs = request.timeout_secs.unwrap_or(300);
 
+    tracing::debug!("Anthropic stream request: url={}, body_size={}", url, body_str.len());
+
     let client = HttpClient::builder()
         .user_agent("reqwest/0.12.12")
         .timeout(Duration::from_secs(timeout_secs))
@@ -974,10 +948,12 @@ async fn call_anthropic_stream(
     }
 
     let resp = req.body(body_str).send().await.map_err(|e| {
+        tracing::error!("Anthropic stream request failed: {}", e);
         classify_api_error("anthropic", &request.model, None, &format!("Request failed: {e}"))
     })?;
 
     let status = resp.status().as_u16();
+    tracing::debug!("Anthropic stream response status: {}", status);
     if status >= 400 {
         let text = resp.text().await.unwrap_or_default();
         return Err(classify_api_error("anthropic", &request.model, Some(status), &text));
@@ -990,6 +966,7 @@ async fn call_anthropic_stream(
         let mut buffer = String::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut stop_reason: Option<String> = None;
         // index -> (id, name, accumulated_json)
         let mut tool_inputs: HashMap<usize, (String, String, String)> = HashMap::new();
 
@@ -1131,6 +1108,11 @@ async fn call_anthropic_stream(
                         }
                     }
                     Some("message_delta") => {
+                        if let Some(delta) = data.get("delta") {
+                            if let Some(sr) = delta.get("stop_reason").and_then(Value::as_str) {
+                                stop_reason = Some(sr.to_string());
+                            }
+                        }
                         if let Some(u) = data.get("usage") {
                             output_tokens = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
                         }
@@ -1141,7 +1123,7 @@ async fn call_anthropic_stream(
                             completion_tokens: output_tokens,
                             total_tokens: input_tokens + output_tokens,
                         });
-                        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
+                        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage, finish_reason: stop_reason.clone() });
                     }
                     _ => {}
                 }
@@ -1154,7 +1136,7 @@ async fn call_anthropic_stream(
             completion_tokens: output_tokens,
             total_tokens: input_tokens + output_tokens,
         });
-        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage });
+        let _ = tx.unbounded_send(LlmStreamEvent::Done { usage, finish_reason: stop_reason.take() });
     });
 
     let stream = rx.filter(|evt| {
@@ -1677,17 +1659,20 @@ mod tests {
             .match_header("x-api-key", "test-anthropic-key")
             .match_header("anthropic-version", "2023-06-01")
             .with_status(200)
-            .with_header("content-type", "application/json")
+            .with_header("content-type", "text/event-stream")
             .with_body(
-                r#"{
-                    "id": "msg_mock_1",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "I can help with that."}],
-                    "model": "claude-sonnet-4-6",
-                    "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 20, "output_tokens": 10}
-                }"#,
+                "event: message_start\n\
+                 data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_mock_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":20,\"output_tokens\":0}}}\n\n\
+                 event: content_block_start\n\
+                 data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                 event: content_block_delta\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I can help with that.\"}}\n\n\
+                 event: content_block_stop\n\
+                 data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                 event: message_delta\n\
+                 data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":10}}\n\n\
+                 event: message_stop\n\
+                 data: {\"type\":\"message_stop\"}\n\n"
             )
             .create();
 
@@ -1719,25 +1704,26 @@ mod tests {
         let mock = _server
             .mock("POST", "/v1/messages")
             .with_status(200)
-            .with_header("content-type", "application/json")
+            .with_header("content-type", "text/event-stream")
             .with_body(
-                r#"{
-                    "id": "msg_mock_2",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "Reading the file..."},
-                        {
-                            "type": "tool_use",
-                            "id": "toolu_xyz",
-                            "name": "file_read",
-                            "input": {"file_path": "/etc/hosts"}
-                        }
-                    ],
-                    "model": "claude-sonnet-4-6",
-                    "stop_reason": "tool_use",
-                    "usage": {"input_tokens": 100, "output_tokens": 50}
-                }"#,
+                "event: message_start\n\
+                 data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_mock_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\n\
+                 event: content_block_start\n\
+                 data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                 event: content_block_delta\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading the file...\"}}\n\n\
+                 event: content_block_stop\n\
+                 data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                 event: content_block_start\n\
+                 data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_xyz\",\"name\":\"file_read\",\"input\":{}}}\n\n\
+                 event: content_block_delta\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\": \\\"/etc/hosts\\\"}\"}}\n\n\
+                 event: content_block_stop\n\
+                 data: {\"type\":\"content_block_stop\",\"index\":1}\n\n\
+                 event: message_delta\n\
+                 data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":50}}\n\n\
+                 event: message_stop\n\
+                 data: {\"type\":\"message_stop\"}\n\n"
             )
             .create();
 

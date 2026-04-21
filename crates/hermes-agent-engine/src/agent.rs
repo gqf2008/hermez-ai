@@ -1316,7 +1316,7 @@ impl AIAgent {
                         }
                     }));
                 }
-                hermes_llm::client::LlmStreamEvent::Done { usage } => {
+                hermes_llm::client::LlmStreamEvent::Done { usage, .. } => {
                     final_usage = usage;
                     break;
                 }
