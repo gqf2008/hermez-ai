@@ -53,14 +53,16 @@ md5 = "0.8.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Matrix adapter with full E2EE support
+matrix-sdk = { version = "0.16", features = ["e2e-encryption", "sqlite", "native-tls"] }
+matrix-sdk-base = "0.16"
+
 [dev-dependencies]
 tempfile.workspace = true
 serial_test = "3"
+serde_urlencoded = "0.7"
 
 [features]
 default = []
-matrix-e2ee = ["dep:matrix-sdk"]
-
-[dependencies.matrix-sdk]
-version = "0.16"
-optional = true
+# Backward-compat no-op feature — E2EE is now always enabled.
+matrix-e2ee = []

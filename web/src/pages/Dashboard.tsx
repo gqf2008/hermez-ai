@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { SystemStatus, Session } from '../types';
 import { api, mockApi, safeApi } from '../api/client';
 
@@ -16,9 +17,11 @@ function fmtTokens(n: number): string {
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isCreating, setIsCreating] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -31,12 +34,32 @@ export default function Dashboard() {
     });
   }, []);
 
+  const handleNewChat = async () => {
+    if (isCreating) return;
+    setIsCreating(true);
+    try {
+      const res = await safeApi(() => api.createSession('New Chat'), () => mockApi.createSession('New Chat'));
+      if (res.id) {
+        navigate(`/sessions/${res.id}`);
+      }
+    } catch (e) {
+      console.error('Failed to create session', e);
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
   if (loading) return <div className="loading">Loading…</div>;
   if (!status) return <div className="error">Failed to load dashboard</div>;
 
   return (
     <div className="page">
-      <h1>Dashboard</h1>
+      <div className="dashboard-header">
+        <h1>Dashboard</h1>
+        <button className="btn primary" onClick={handleNewChat} disabled={isCreating}>
+          {isCreating ? 'Creating…' : '+ New Chat'}
+        </button>
+      </div>
 
       <div className="cards">
         <div className="card">

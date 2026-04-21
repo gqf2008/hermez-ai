@@ -302,7 +302,10 @@ impl TelegramFallbackClient {
 
             let req = if first {
                 first = false;
-                request.take().unwrap()
+                match request.take() {
+                    Some(r) => r,
+                    None => break,
+                }
             } else {
                 match request_backup.as_ref().and_then(|r| r.try_clone()) {
                     Some(r) => r,
@@ -328,16 +331,17 @@ impl TelegramFallbackClient {
                         return Err(e);
                     }
                     last_err = Some(e);
-                    if ip.is_none() {
+                    if let Some(fallback_ip) = ip {
+                        if let Some(ref err) = last_err {
+                            warn!(
+                                "[Telegram] Fallback IP {} failed: {err}",
+                                fallback_ip,
+                            );
+                        }
+                    } else {
                         warn!(
                             "[Telegram] Primary api.telegram.org connection failed; trying fallback IPs {}",
                             self.fallback_ips.join(", ")
-                        );
-                    } else {
-                        warn!(
-                            "[Telegram] Fallback IP {} failed: {}",
-                            ip.unwrap(),
-                            last_err.as_ref().unwrap()
                         );
                     }
                 }

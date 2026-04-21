@@ -1,23 +1,34 @@
-//! Matrix platform adapter.
+//! Matrix platform adapter with E2EE support via matrix-sdk 0.16.
 //!
-//! Connects to any Matrix homeserver via the Client-Server HTTP API.
-//! Supports sync-based message receiving and room message sending.
+//! Connects to any Matrix homeserver via the matrix-sdk Client API.
+//! Supports sync-based message receiving, room message sending, and
+//! end-to-end encryption (E2EE) via the SDK's built-in Olm/Megolm
+//! implementation backed by SQLite.
 //!
-//! Does NOT implement end-to-end encryption (E2EE) — encrypted rooms
-//! will not work. This is a pragmatic first-pass port of the Python
-//! adapter without the heavy mautrix/crypto dependency.
-//!
-//! Mirrors Python `gateway/platforms/matrix.py` (core sync + send only).
+//! Replaces the previous pure-HTTP polling adapter.
 
-use reqwest::Client;
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
-use tracing::{debug, error, info, warn};
+
+use futures::StreamExt;
+use matrix_sdk::{
+    Client, Room, SessionMeta, SessionTokens,
+    config::SyncSettings,
+    authentication::matrix::MatrixSession,
+};
+use matrix_sdk::ruma::{
+    events::room::message::{RoomMessageEventContent, MessageType as RumaMessageType, Relation, SyncRoomMessageEvent},
+    api::client::receipt::create_receipt::v3::ReceiptType,
+    events::receipt::ReceiptThread,
+    OwnedRoomId, RoomId, UserId, EventId,
+};
+
+use tokio::sync::Mutex as TokioMutex;
+use tokio::time::Duration;
+use tracing::{error, info, warn};
 
 use crate::config::Platform;
 use crate::platforms::helpers::ThreadParticipationTracker;
@@ -27,7 +38,6 @@ use crate::session::{SessionSource, SessionStore};
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const MAX_MESSAGE_LENGTH: usize = 4000;
-const SYNC_TIMEOUT_MS: u64 = 30000;
 const STARTUP_GRACE_SECONDS: f64 = 5.0;
 
 // ── Configuration ──────────────────────────────────────────────────────────
@@ -47,6 +57,7 @@ pub struct MatrixConfig {
     pub reactions_enabled: bool,
     pub home_channel: Option<String>,
     pub encryption: bool,
+    pub store_path: PathBuf,
 }
 
 impl Default for MatrixConfig {
@@ -57,6 +68,8 @@ impl Default for MatrixConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+
+        let store_path = hermes_core::get_hermes_home().join("matrix_store");
 
         Self {
             homeserver: std::env::var("MATRIX_HOMESERVER").unwrap_or_default().trim_end_matches('/').to_string(),
@@ -90,6 +103,7 @@ impl Default for MatrixConfig {
                 .ok()
                 .map(|s| matches!(s.to_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
+            store_path,
         }
     }
 }
@@ -126,31 +140,22 @@ impl MatrixConfig {
 
 pub struct MatrixAdapter {
     config: MatrixConfig,
-    client: Client,
+    client: tokio::sync::Mutex<Option<Client>>,
     threads: ThreadParticipationTracker,
     processed_events: parking_lot::Mutex<HashSet<String>>,
-    joined_rooms: parking_lot::Mutex<HashSet<String>>,
-    dm_rooms: parking_lot::Mutex<HashMap<String, bool>>,
     startup_ts: f64,
-    next_batch: parking_lot::Mutex<Option<String>>,
 }
 
 impl MatrixAdapter {
     pub fn new(config: MatrixConfig) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: tokio::sync::Mutex::new(None),
             threads: ThreadParticipationTracker::new("matrix", 5000),
             processed_events: parking_lot::Mutex::new(HashSet::with_capacity(1000)),
-            joined_rooms: parking_lot::Mutex::new(HashSet::new()),
-            dm_rooms: parking_lot::Mutex::new(HashMap::new()),
             startup_ts: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64(),
-            next_batch: parking_lot::Mutex::new(None),
             config,
         }
     }
@@ -164,176 +169,119 @@ impl MatrixAdapter {
             return Err("Matrix: not configured (need homeserver + access_token or user_id+password)".into());
         }
 
-        // Validate token / login
-        if self.config.access_token.is_empty() {
-            self._login().await?;
+        let store_path = &self.config.store_path;
+        std::fs::create_dir_all(store_path)
+            .map_err(|e| format!("Matrix store dir creation failed: {e}"))?;
+
+        let client = Client::builder()
+            .homeserver_url(&self.config.homeserver)
+            .sqlite_store(store_path, None)
+            .build()
+            .await
+            .map_err(|e| format!("Matrix client build failed: {e}"))?;
+
+        let session_file = hermes_core::get_hermes_home().join("matrix_session.json");
+
+        let restored = if session_file.exists() {
+            match Self::_restore_session(&client, &session_file).await {
+                Ok(()) => {
+                    info!("Matrix: session restored from {}", session_file.display());
+                    true
+                }
+                Err(e) => {
+                    warn!("Matrix: session restore failed: {e}, falling back to login");
+                    false
+                }
+            }
         } else {
-            self._whoami().await?;
-        }
-
-        // Initial sync to get room list and next_batch token
-        let sync_resp = self._sync(None).await?;
-        if let Some(rooms) = sync_resp.rooms.as_ref() {
-            if let Some(join) = rooms.join.as_ref() {
-                let mut joined = self.joined_rooms.lock();
-                for room_id in join.keys() {
-                    joined.insert(room_id.clone());
-                }
-            }
-            if let Some(invite) = rooms.invite.as_ref() {
-                let to_join: Vec<String> = {
-                    let joined = self.joined_rooms.lock();
-                    invite.keys().filter(|r| !joined.contains(*r)).cloned().collect()
-                };
-                for room_id in to_join {
-                    info!("Matrix: auto-joining invited room {room_id}");
-                    let _ = self._join_room(&room_id).await;
-                    self.joined_rooms.lock().insert(room_id);
-                }
-            }
-        }
-        if let Some(nb) = &sync_resp.next_batch {
-            *self.next_batch.lock() = Some(nb.clone());
-            info!("Matrix: initial sync complete, joined {} rooms", self.joined_rooms.lock().len());
-        }
-
-        self._refresh_dm_cache().await;
-        Ok(())
-    }
-
-    async fn _whoami(&self) -> Result<WhoamiResponse, String> {
-        let url = format!("{}/_matrix/client/v3/account/whoami", self.config.homeserver);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Matrix whoami request failed: {e}"))?;
-
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| format!("Matrix whoami parse failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!("Matrix whoami failed: {status} — {body}"));
-        }
-
-        let user_id = body.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        info!("Matrix: using access token for {user_id}");
-        Ok(WhoamiResponse { user_id })
-    }
-
-    async fn _login(&self) -> Result<(), String> {
-        let url = format!("{}/_matrix/client/v3/login", self.config.homeserver);
-        let payload = serde_json::json!({
-            "type": "m.login.password",
-            "identifier": {
-                "type": "m.id.user",
-                "user": self.config.user_id,
-            },
-            "password": self.config.password,
-            "initial_device_display_name": "Hermes Agent",
-        });
-
-        let resp = self
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("Matrix login request failed: {e}"))?;
-
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| format!("Matrix login parse failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!("Matrix login failed: {status} — {body}"));
-        }
-
-        let _token = body
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or("Matrix login response missing access_token")?;
-        // Note: access_token is stored in config; in a real scenario we'd need
-        // interior mutability here. For simplicity we skip login-with-password
-        // in this simplified adapter or require the caller to set access_token.
-        Err("Matrix password login not fully implemented in simplified adapter — use MATRIX_ACCESS_TOKEN".into())
-    }
-
-    async fn _sync(&self, since: Option<&str>) -> Result<SyncResponse, String> {
-        let mut url = format!(
-            "{}/_matrix/client/v3/sync?timeout={}",
-            self.config.homeserver, SYNC_TIMEOUT_MS
-        );
-        if let Some(s) = since {
-            url.push_str(&format!("&since={}", urlencoding::encode(s)));
-        }
-
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Matrix sync request failed: {e}"))?;
-
-        let status = resp.status();
-        let body: SyncResponse = resp.json().await.map_err(|e| format!("Matrix sync parse failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!("Matrix sync failed: {status}"));
-        }
-        Ok(body)
-    }
-
-    async fn _join_room(&self, room_id: &str) -> Result<(), String> {
-        let url = format!("{}/_matrix/client/v3/rooms/{}/join", self.config.homeserver, urlencoding::encode(room_id));
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Matrix join request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            return Err(format!("Matrix join failed: {body}"));
-        }
-        Ok(())
-    }
-
-    async fn _refresh_dm_cache(&self) {
-        // Correct endpoint for m.direct account data:
-        let url = format!(
-            "{}/_matrix/client/v3/user/{}/account_data/m.direct",
-            self.config.homeserver,
-            urlencoding::encode(&self.config.user_id),
-        );
-
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
-            .send()
-            .await;
-
-        let dm_data: Option<HashMap<String, Vec<String>>> = match resp {
-            Ok(r) if r.status().is_success() => r.json().await.ok(),
-            _ => None,
+            false
         };
 
-        let mut dm_room_ids = HashSet::new();
-        if let Some(data) = dm_data {
-            for rooms in data.values() {
-                for rid in rooms {
-                    dm_room_ids.insert(rid.clone());
-                }
+        if !restored {
+            if !self.config.access_token.is_empty() {
+                Self::_login_with_token(&client, &self.config).await?;
+            } else if !self.config.user_id.is_empty() && !self.config.password.is_empty() {
+                Self::_login_with_password(&client, &self.config).await?;
+            } else {
+                return Err("Matrix: no access token or password available".into());
+            }
+            if let Err(e) = Self::_save_session(&client, &session_file).await {
+                warn!("Matrix: failed to save session: {e}");
             }
         }
 
-        let joined = self.joined_rooms.lock();
-        *self.dm_rooms.lock() = joined
-            .iter()
-            .map(|rid| (rid.clone(), dm_room_ids.contains(rid)))
-            .collect();
+        info!("Matrix: logged in as {}", self.config.user_id);
+
+        // E2EE initialization (best-effort)
+        client.encryption().wait_for_e2ee_initialization_tasks().await;
+        info!("Matrix: E2EE initialization complete");
+
+        // Initial sync
+        info!("Matrix: performing initial sync...");
+        client.sync_once(SyncSettings::default()).await
+            .map_err(|e| format!("Matrix initial sync failed: {e}"))?;
+
+        // Auto-join invites
+        for room in client.invited_rooms() {
+            info!("Matrix: auto-joining invited room {}", room.room_id());
+            let _ = room.join().await;
+        }
+
+        info!("Matrix: connect complete, joined {} rooms", client.joined_rooms().len());
+        *self.client.lock().await = Some(client);
+        Ok(())
+    }
+
+    async fn _login_with_token(client: &Client, config: &MatrixConfig) -> Result<(), String> {
+        let user_id = UserId::parse(&config.user_id)
+            .map_err(|e| format!("Invalid user_id: {e}"))?;
+        let session = MatrixSession {
+            meta: SessionMeta {
+                user_id,
+                device_id: config.device_id.clone().into(),
+            },
+            tokens: SessionTokens {
+                access_token: config.access_token.clone(),
+                refresh_token: None,
+            },
+        };
+        client.matrix_auth().restore_session(session, matrix_sdk::store::RoomLoadSettings::All).await
+            .map_err(|e| format!("Matrix session restore failed: {e}"))?;
+        Ok(())
+    }
+
+    async fn _login_with_password(client: &Client, config: &MatrixConfig) -> Result<(), String> {
+        let mut builder = client.matrix_auth()
+            .login_username(&config.user_id, &config.password)
+            .initial_device_display_name("Hermes Agent");
+        if !config.device_id.is_empty() {
+            builder = builder.device_id(&config.device_id);
+        }
+        let response = builder.send().await
+            .map_err(|e| format!("Matrix password login failed: {e}"))?;
+        info!("Matrix: password login successful, device_id={}", response.device_id);
+        Ok(())
+    }
+
+    async fn _save_session(client: &Client, path: &PathBuf) -> Result<(), String> {
+        let auth = client.matrix_auth();
+        let session = auth.session()
+            .ok_or("No active session to save")?;
+        let json = serde_json::to_string_pretty(&session)
+            .map_err(|e| format!("Session serialization failed: {e}"))?;
+        tokio::fs::write(path, json).await
+            .map_err(|e| format!("Session write failed: {e}"))?;
+        Ok(())
+    }
+
+    async fn _restore_session(client: &Client, path: &PathBuf) -> Result<(), String> {
+        let json = tokio::fs::read_to_string(path).await
+            .map_err(|e| format!("Session read failed: {e}"))?;
+        let session: MatrixSession = serde_json::from_str(&json)
+            .map_err(|e| format!("Session deserialization failed: {e}"))?;
+        client.matrix_auth().restore_session(session, matrix_sdk::store::RoomLoadSettings::All).await
+            .map_err(|e| format!("Session restore failed: {e}"))?;
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -345,40 +293,23 @@ impl MatrixAdapter {
             return Ok(String::new());
         }
 
+        let client = {
+            let guard = self.client.lock().await;
+            guard.as_ref().cloned().ok_or("Matrix client not connected")?
+        };
+
+        let room = client
+            .get_room(&RoomId::parse(room_id).map_err(|e| format!("Invalid room_id: {e}"))?)
+            .ok_or_else(|| format!("Room {room_id} not found"))?;
+
         let chunks = Self::chunk_text(text, MAX_MESSAGE_LENGTH);
         let mut last_event_id = String::new();
 
         for chunk in chunks {
-            let txn_id = format!("hermes-{}", uuid::Uuid::new_v4());
-            let url = format!(
-                "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
-                self.config.homeserver,
-                urlencoding::encode(room_id),
-                urlencoding::encode(&txn_id),
-            );
-
-            let payload = serde_json::json!({
-                "msgtype": "m.text",
-                "body": chunk,
-            });
-
-            let resp = self
-                .client
-                .put(&url)
-                .header("Authorization", format!("Bearer {}", self.config.access_token))
-                .json(&payload)
-                .send()
-                .await
-                .map_err(|e| format!("Matrix send request failed: {e}"))?;
-
-            let status = resp.status();
-            let body: serde_json::Value = resp.json().await.map_err(|e| format!("Matrix send parse failed: {e}"))?;
-
-            if !status.is_success() {
-                return Err(format!("Matrix send failed: {status} — {body}"));
-            }
-
-            last_event_id = body.get("event_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let content = RoomMessageEventContent::text_plain(chunk);
+            let response = room.send(content).await
+                .map_err(|e| format!("Matrix send failed: {e}"))?;
+            last_event_id = response.event_id.to_string();
         }
 
         Ok(last_event_id)
@@ -409,12 +340,12 @@ impl MatrixAdapter {
     }
 
     // ------------------------------------------------------------------
-    // Polling / sync loop
+    // Sync loop
     // ------------------------------------------------------------------
 
     pub async fn run(
         &self,
-        handler: Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
+        handler: Arc<TokioMutex<Option<Arc<dyn MessageHandler>>>>,
         running: Arc<AtomicBool>,
         running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
         busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
@@ -422,86 +353,71 @@ impl MatrixAdapter {
         default_model: String,
         per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
     ) {
-        let mut poll_interval = interval(Duration::from_millis(100));
-        let mut consecutive_errors = 0u32;
+        let client = {
+            let guard = self.client.lock().await;
+            match guard.as_ref().cloned() {
+                Some(c) => c,
+                None => {
+                    error!("Matrix: run() called before connect()");
+                    return;
+                }
+            }
+        };
 
-        if self.config.encryption {
-            #[cfg(feature = "matrix-e2ee")]
-            info!("Matrix E2EE enabled (matrix-sdk path)");
-            #[cfg(not(feature = "matrix-e2ee"))]
-            warn!("Matrix E2EE requested (MATRIX_ENCRYPTION=true) but the 'matrix-e2ee' feature is not enabled. Encrypted rooms will NOT work. Rebuild with --features matrix-e2ee to enable E2EE support.");
-        }
+        let mut sync_stream = Box::pin(client.sync_stream(SyncSettings::default()).await);
+        let mut consecutive_errors = 0u32;
 
         info!("Matrix sync loop started");
 
         while running.load(Ordering::SeqCst) {
-            poll_interval.tick().await;
+            tokio::select! {
+                next = sync_stream.next() => {
+                    match next {
+                        Some(Ok(response)) => {
+                            consecutive_errors = 0;
 
-            let next_batch = self.next_batch.lock().clone();
-            match self._sync(next_batch.as_deref()).await {
-                Ok(sync_resp) => {
-                    consecutive_errors = 0;
-                    *self.next_batch.lock() = sync_resp.next_batch.clone();
-
-                    // Update joined rooms
-                    if let Some(rooms) = sync_resp.rooms.as_ref() {
-                        {
-                            let mut joined = self.joined_rooms.lock();
-                            if let Some(join) = rooms.join.as_ref() {
-                                for room_id in join.keys() {
-                                    joined.insert(room_id.clone());
+                            for (room_id, room_update) in &response.rooms.joined {
+                                for timeline_event in &room_update.timeline.events {
+                                    self._process_timeline_event(
+                                        room_id, timeline_event, &client,
+                                        &handler, &running, &running_sessions,
+                                        &busy_ack_ts, &session_store,
+                                        &default_model, &per_chat_model,
+                                    ).await;
                                 }
                             }
-                        }
-                        if let Some(invite) = rooms.invite.as_ref() {
-                            let to_join: Vec<String> = {
-                                let joined = self.joined_rooms.lock();
-                                invite.keys().filter(|r| !joined.contains(*r)).cloned().collect()
-                            };
-                            for room_id in to_join {
-                                info!("Matrix: auto-joining invited room {room_id}");
-                                let _ = self._join_room(&room_id).await;
-                                self.joined_rooms.lock().insert(room_id);
-                            }
-                        }
-                    }
 
-                    // Process timeline events
-                    if let Some(rooms) = sync_resp.rooms.as_ref() {
-                        if let Some(join) = rooms.join.as_ref() {
-                            for (room_id, room_data) in join {
-                                if let Some(timeline) = room_data.timeline.as_ref() {
-                                    for event in &timeline.events {
-                                        self._process_event(
-                                            room_id, event, &handler, &running,
-                                            &running_sessions, &busy_ack_ts, &session_store,
-                                            &default_model, &per_chat_model,
-                                        ).await;
-                                    }
-                                }
+                            for room in client.invited_rooms() {
+                                info!("Matrix: auto-joining invited room {}", room.room_id());
+                                let _ = room.join().await;
                             }
+                        }
+                        Some(Err(e)) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("401")
+                                || err_str.contains("403")
+                                || err_str.contains("Unauthorized")
+                                || err_str.contains("Forbidden")
+                                || err_str.contains("M_UNKNOWN_TOKEN")
+                            {
+                                error!("Matrix: permanent auth error — stopping sync: {e}");
+                                return;
+                            }
+                            consecutive_errors += 1;
+                            if consecutive_errors > 5 {
+                                warn!("Matrix: {consecutive_errors} consecutive sync errors: {e}");
+                            } else {
+                                error!("Matrix sync error: {e}");
+                            }
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                        None => {
+                            warn!("Matrix sync stream ended");
+                            break;
                         }
                     }
                 }
-                Err(e) => {
-                    let err_lower = e.to_lowercase();
-                    if err_lower.contains("401")
-                        || err_lower.contains("403")
-                        || err_lower.contains("unauthorized")
-                        || err_lower.contains("forbidden")
-                        || err_lower.contains("m_unknown_token")
-                    {
-                        error!("Matrix: permanent auth error — stopping sync: {e}");
-                        return;
-                    }
-                    consecutive_errors += 1;
-                    if consecutive_errors > 5 {
-                        warn!("Matrix: {consecutive_errors} consecutive sync errors: {e}");
-                    } else {
-                        error!("Matrix sync error: {e}");
-                    }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
         }
 
@@ -512,11 +428,12 @@ impl MatrixAdapter {
     // Event processing
     // ------------------------------------------------------------------
 
-    async fn _process_event(
+    async fn _process_timeline_event(
         &self,
-        room_id: &str,
-        event: &serde_json::Value,
-        handler: &Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
+        room_id: &OwnedRoomId,
+        timeline_event: &matrix_sdk::deserialized_responses::TimelineEvent,
+        client: &Client,
+        handler: &Arc<TokioMutex<Option<Arc<dyn MessageHandler>>>>,
         running: &Arc<AtomicBool>,
         running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
         busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
@@ -524,77 +441,82 @@ impl MatrixAdapter {
         default_model: &str,
         per_chat_model: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
     ) {
-        let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("");
+        let raw = timeline_event.kind.raw();
+        let msg_event = match raw.deserialize() {
+            Ok(matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(
+                    SyncRoomMessageEvent::Original(ev)
+                )
+            )) => ev,
+            _ => return,
+        };
+
+        let sender = msg_event.sender.as_str();
         if sender == self.config.user_id {
-            return; // Ignore own messages
+            return;
         }
 
-        let event_id = event.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
+        let event_id = msg_event.event_id.as_str();
         if event_id.is_empty() || self._is_duplicate_event(event_id) {
             return;
         }
 
         // Startup grace
-        let raw_ts = event
-            .get("origin_server_ts")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let event_ts = raw_ts as f64 / 1000.0;
+        let event_ts = f64::from(msg_event.origin_server_ts.as_secs());
         if event_ts > 0.0 && event_ts < self.startup_ts - STARTUP_GRACE_SECONDS {
             return;
         }
 
-        let content = match event.get("content") {
-            Some(c) => c,
-            None => return,
+        let content = &msg_event.content;
+        let body = match &content.msgtype {
+            RumaMessageType::Text(t) => t.body.as_str(),
+            _ => return,
         };
 
-        let msgtype = content.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
-        if msgtype != "m.text" {
-            return;
-        }
-
         // Skip edits
-        let relates_to = content.get("m.relates_to");
-        if let Some(rt) = relates_to {
-            if rt.get("rel_type").and_then(|v| v.as_str()) == Some("m.replace") {
-                return;
-            }
-        }
-
-        // Skip m.notice (bot responses)
-        if msgtype == "m.notice" {
+        if matches!(content.relates_to, Some(Relation::Replacement(_))) {
             return;
         }
 
-        let body = content.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        // Skip notices
+        if matches!(&content.msgtype, RumaMessageType::Notice(_)) {
+            return;
+        }
+
         if body.is_empty() {
             return;
         }
 
-        let is_dm = self._is_dm_room(room_id).await;
+        // DM detection
+        let room = match client.get_room(room_id) {
+            Some(r) => r,
+            None => return,
+        };
+        let is_dm = room.is_direct().await.unwrap_or(false);
         let chat_type = if is_dm { "dm" } else { "group" };
 
         // Mention gating
-        let formatted_body = content.get("formatted_body").and_then(|v| v.as_str());
-        let mentions = content.get("m.mentions");
-        let is_mentioned = self._is_bot_mentioned(body, formatted_body, mentions);
+        let formatted_body = match &content.msgtype {
+            RumaMessageType::Text(t) => t.formatted.as_ref().map(|f| f.body.as_str()),
+            _ => None,
+        };
+        let is_mentioned = self._is_bot_mentioned(body, formatted_body, content.mentions.as_ref());
 
         if !is_dm {
-            let is_free_room = self.config.free_rooms.contains(room_id);
-            let in_bot_thread = false; // Simplified — no thread tracking for now
+            let is_free_room = self.config.free_rooms.contains(room_id.as_str());
+            let in_bot_thread = false;
             if self.config.require_mention && !is_free_room && !in_bot_thread && !is_mentioned {
                 return;
             }
         }
 
-        let display_name = self._get_display_name(room_id, sender).await;
+        let display_name = self._get_display_name(&room, sender).await;
         let thread_id = if self.config.auto_thread && !is_dm {
             Some(event_id.to_string())
         } else {
             None
         };
-        if let Some(ref tid) = thread_id {
+        if let Some(tid) = &thread_id {
             self.threads.mark(tid);
         }
 
@@ -605,16 +527,17 @@ impl MatrixAdapter {
         };
 
         // Send read receipt (fire-and-forget)
-        let _ = self._send_read_receipt(room_id, event_id).await;
+        if let Ok(event_id_parsed) = EventId::parse(event_id) {
+            let _ = room.send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, event_id_parsed).await;
+        }
 
         info!(
             "Matrix message from {} in {}: {}",
             display_name, room_id, &body[..body.len().min(80)],
         );
 
-        // Route to handler
         route_matrix_message(
-            self, room_id, &body, sender, &display_name, chat_type,
+            self, room_id.as_str(), &body, sender, &display_name, chat_type,
             thread_id.as_deref(), handler, running, running_sessions,
             busy_ack_ts, session_store, default_model, per_chat_model,
         ).await;
@@ -635,29 +558,16 @@ impl MatrixAdapter {
         false
     }
 
-    async fn _is_dm_room(&self, room_id: &str) -> bool {
-        let dm_rooms = self.dm_rooms.lock();
-        if let Some(&is_dm) = dm_rooms.get(room_id) {
-            return is_dm;
-        }
-        false
-    }
-
     fn _is_bot_mentioned(
         &self,
         body: &str,
         formatted_body: Option<&str>,
-        mentions: Option<&serde_json::Value>,
+        mentions: Option<&matrix_sdk::ruma::events::Mentions>,
     ) -> bool {
-        // MSC3952 m.mentions.user_ids
         if let Some(m) = mentions {
-            if let Some(user_ids) = m.get("user_ids").and_then(|v| v.as_array()) {
-                for uid in user_ids {
-                    if let Some(s) = uid.as_str() {
-                        if s == self.config.user_id {
-                            return true;
-                        }
-                    }
+            if let Ok(user_id) = UserId::parse(&self.config.user_id) {
+                if m.user_ids.contains(&user_id) {
+                    return true;
                 }
             }
         }
@@ -682,61 +592,12 @@ impl MatrixAdapter {
         body.replace(&self.config.user_id, "").trim().to_string()
     }
 
-    async fn _get_display_name(&self, _room_id: &str, user_id: &str) -> String {
+    async fn _get_display_name(&self, _room: &Room, user_id: &str) -> String {
         if user_id.starts_with('@') && user_id.contains(':') {
             return user_id[1..].split(':').next().unwrap_or(user_id).to_string();
         }
         user_id.to_string()
     }
-
-    async fn _send_read_receipt(&self, room_id: &str, event_id: &str) -> Result<(), String> {
-        let url = format!(
-            "{}/_matrix/client/v3/rooms/{}/receipt/m.read/{}",
-            self.config.homeserver,
-            urlencoding::encode(room_id),
-            urlencoding::encode(event_id),
-        );
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Matrix read receipt failed: {e}"))?;
-        if !resp.status().is_success() {
-            debug!("Matrix: read receipt failed for {event_id}");
-        }
-        Ok(())
-    }
-}
-
-// ── Sync response types ────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct SyncResponse {
-    next_batch: Option<String>,
-    rooms: Option<Rooms>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct Rooms {
-    join: Option<HashMap<String, JoinedRoom>>,
-    invite: Option<HashMap<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct JoinedRoom {
-    timeline: Option<Timeline>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct Timeline {
-    events: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct WhoamiResponse {
-    user_id: String,
 }
 
 // ── Message routing ────────────────────────────────────────────────────────
@@ -749,7 +610,7 @@ async fn route_matrix_message(
     display_name: &str,
     chat_type: &str,
     thread_id: Option<&str>,
-    handler: &Arc<Mutex<Option<Arc<dyn MessageHandler>>>>,
+    handler: &Arc<TokioMutex<Option<Arc<dyn MessageHandler>>>>,
     _running: &Arc<AtomicBool>,
     running_sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
@@ -765,7 +626,6 @@ async fn route_matrix_message(
         .unwrap_or_default()
         .as_secs_f64();
 
-    // Busy session check
     let busy_elapsed_min: Option<f64> = {
         let sessions = running_sessions.lock();
         sessions.get(chat_id).map(|&start_ts| (now - start_ts) / 60.0)
@@ -846,4 +706,201 @@ async fn route_matrix_message(
             let _ = adapter.send_text(chat_id, "Sorry, I encountered an error processing your message.").await;
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Config tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_config_default_empty() {
+        // Ensure default() doesn't panic even when env vars are missing.
+        let cfg = MatrixConfig::default();
+        assert!(cfg.homeserver.is_empty());
+        assert!(cfg.access_token.is_empty());
+        assert!(cfg.user_id.is_empty());
+        assert!(!cfg.allow_all_users);
+        assert!(cfg.require_mention);
+        assert!(cfg.auto_thread);
+        assert!(cfg.reactions_enabled);
+        assert!(cfg.allowed_users.is_empty());
+        assert!(!cfg.is_configured());
+    }
+
+    #[test]
+    fn test_matrix_config_is_configured_token() {
+        let cfg = MatrixConfig {
+            homeserver: "https://example.com".to_string(),
+            access_token: "tok123".to_string(),
+            ..Default::default()
+        };
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn test_matrix_config_is_configured_password() {
+        let cfg = MatrixConfig {
+            homeserver: "https://example.com".to_string(),
+            user_id: "@user:example.com".to_string(),
+            password: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn test_matrix_config_is_configured_neither() {
+        let cfg = MatrixConfig {
+            homeserver: "https://example.com".to_string(),
+            ..Default::default()
+        };
+        // No access_token and no password => not configured
+        assert!(!cfg.is_configured());
+    }
+
+    #[test]
+    fn test_matrix_config_from_extra() {
+        let mut extra = HashMap::new();
+        extra.insert("homeserver".to_string(), serde_json::json!("https://matrix.org"));
+        extra.insert("user_id".to_string(), serde_json::json!("@alice:matrix.org"));
+        extra.insert("password".to_string(), serde_json::json!("hunter2"));
+        extra.insert("device_id".to_string(), serde_json::json!("DEVICE01"));
+
+        let cfg = MatrixConfig::from_extra(&extra);
+        assert_eq!(cfg.homeserver, "https://matrix.org");
+        assert_eq!(cfg.user_id, "@alice:matrix.org");
+        assert_eq!(cfg.password, "hunter2");
+        assert_eq!(cfg.device_id, "DEVICE01");
+        assert!(cfg.is_configured());
+    }
+
+    // ── chunk_text tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_chunk_text_no_split() {
+        let chunks = MatrixAdapter::chunk_text("hello", 100);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_text_exact_boundary() {
+        let text = "a".repeat(4000);
+        let chunks = MatrixAdapter::chunk_text(&text, 4000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 4000);
+    }
+
+    #[test]
+    fn test_chunk_text_splits() {
+        let text = "Hello world! ".repeat(500); // > 4000 chars
+        let chunks = MatrixAdapter::chunk_text(&text, 100);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 100);
+        }
+        let joined: String = chunks.concat();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn test_chunk_text_unicode_boundary() {
+        let text = "α".repeat(20); // 2 bytes each = 40 bytes
+        let chunks = MatrixAdapter::chunk_text(&text, 10);
+        assert_eq!(chunks.len(), 4); // 40/10 = 4
+        for chunk in &chunks {
+            assert!(chunk.len() <= 10);
+        }
+        let joined: String = chunks.concat();
+        assert_eq!(joined, text);
+    }
+
+    // ── _is_duplicate_event tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_is_duplicate_event_empty() {
+        let cfg = MatrixConfig::default();
+        let adapter = MatrixAdapter::new(cfg);
+        assert!(!adapter._is_duplicate_event(""));
+    }
+
+    #[test]
+    fn test_is_duplicate_event_deduplication() {
+        let cfg = MatrixConfig::default();
+        let adapter = MatrixAdapter::new(cfg);
+        assert!(!adapter._is_duplicate_event("evt_1"));
+        assert!(adapter._is_duplicate_event("evt_1"));
+        assert!(!adapter._is_duplicate_event("evt_2"));
+    }
+
+    #[test]
+    fn test_is_duplicate_event_clear_at_limit() {
+        let cfg = MatrixConfig::default();
+        let adapter = MatrixAdapter::new(cfg);
+        for i in 0..1001 {
+            adapter._is_duplicate_event(&format!("evt_{i}"));
+        }
+        // After 1001 entries the set should have been cleared
+        assert!(!adapter._is_duplicate_event("evt_0"));
+    }
+
+    // ── _is_bot_mentioned tests (no Mentions struct) ──────────────────────
+
+    #[test]
+    fn test_is_bot_mentioned_by_user_id() {
+        let cfg = MatrixConfig {
+            user_id: "@bot:example.com".to_string(),
+            ..Default::default()
+        };
+        let adapter = MatrixAdapter::new(cfg);
+        assert!(adapter._is_bot_mentioned("hello @bot:example.com", None, None));
+        assert!(!adapter._is_bot_mentioned("hello @other:example.com", None, None));
+    }
+
+    #[test]
+    fn test_is_bot_mentioned_by_localpart() {
+        let cfg = MatrixConfig {
+            user_id: "@hermes_bot:example.com".to_string(),
+            ..Default::default()
+        };
+        let adapter = MatrixAdapter::new(cfg);
+        assert!(adapter._is_bot_mentioned("hey hermes_bot", None, None));
+        assert!(adapter._is_bot_mentioned("HErMeS_BOt", None, None)); // case-insensitive
+        assert!(!adapter._is_bot_mentioned("hey other_bot", None, None));
+    }
+
+    #[test]
+    fn test_is_bot_mentioned_by_matrix_to_link() {
+        let cfg = MatrixConfig {
+            user_id: "@bot:example.com".to_string(),
+            ..Default::default()
+        };
+        let adapter = MatrixAdapter::new(cfg);
+        assert!(adapter._is_bot_mentioned(
+            "hello",
+            Some("Check out matrix.to/#/@bot:example.com"),
+            None,
+        ));
+    }
+
+    // ── _strip_mention tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_mention() {
+        let cfg = MatrixConfig {
+            user_id: "@bot:example.com".to_string(),
+            ..Default::default()
+        };
+        let adapter = MatrixAdapter::new(cfg);
+        assert_eq!(
+            adapter._strip_mention("@bot:example.com hello"),
+            "hello"
+        );
+        assert_eq!(
+            adapter._strip_mention("hello @bot:example.com world"),
+            "hello  world"
+        );
+    }
+
 }

@@ -540,7 +540,15 @@ hermes --hermes-home ~/.hermes-prod chat
 | Signal | signal | signal-cli |
 | WhatsApp | whatsapp | waha 网关 |
 | 飞书(国际) | lark | Lark App ID |
-| 飞书国内版 | feishu | Feishu Open API |
+| 飞书国内版 | feishu | Feishu Open API + Drive Comment Agent |
+| Matrix | matrix | matrix-sdk 0.16 + E2EE + SQLite crypto store |
+| Mattermost | mattermost | Bot Token + WebSocket |
+| HomeAssistant | homeassistant | HASS_TOKEN + WebSocket |
+| BlueBubbles | bluebubbles | macOS iMessage 网关 |
+| 企业微信回调 | wecom_callback | Corp ID + Encoding AES Key |
+| Email | email | SMTP/IMAP |
+| SMS | sms | Twilio/Plivo |
+| Webhook | webhook | 通用 HTTP Webhook |
 | OpenAI API | api_server | OpenAI 兼容 HTTP API |
 
 启动指定平台：
@@ -560,6 +568,8 @@ hermes gateway run --platform telegram
 ├── sessions.db              # SQLite 会话数据库 (含 FTS5 搜索)
 ├── cron_jobs.json           # 定时任务
 ├── webhooks.json            # Webhook 订阅
+├── matrix_session.json      # Matrix session 持久化
+├── matrix_store/            # Matrix E2EE SQLite crypto store
 ├── .plugin_registry.json    # 插件注册表
 ├── skills/                  # 技能文件
 │   ├── index.json

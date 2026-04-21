@@ -161,7 +161,7 @@ fn interpret_exit_code(command: &str, exit_code: i32) -> Option<String> {
     }
 
     // Extract the last command in a pipeline/chain.
-    let segments: Vec<&str> = command.split(|c| c == '|' || c == ';' || c == '&').collect();
+    let segments: Vec<&str> = command.split(['|', ';', '&']).collect();
     let last_segment = segments.last().unwrap_or(&command).trim();
 
     // Get base command name, skipping env var assignments.
@@ -171,7 +171,7 @@ fn interpret_exit_code(command: &str, exit_code: i32) -> Option<String> {
         if w.contains('=') && !w.starts_with('-') {
             continue;
         }
-        base_cmd = w.split('/').last().unwrap_or(w);
+        base_cmd = w.split('/').next_back().unwrap_or(w);
         break;
     }
 
@@ -366,11 +366,7 @@ fn rewrite_real_sudo_invocations(command: &str) -> (String, bool) {
             out.push_str(&token);
         }
 
-        if command_start && looks_like_env_assignment(&token) {
-            command_start = true;
-        } else {
-            command_start = false;
-        }
+        command_start = command_start && looks_like_env_assignment(&token);
         i = next_i;
     }
 
@@ -429,7 +425,8 @@ fn prompt_for_sudo_password(timeout_seconds: u64) -> String {
     eprintln!("├{}┤", "─".repeat(58));
     eprintln!("│  Enter password below (input is hidden), or:            │");
     eprintln!("│    • Press Enter to skip (command fails gracefully)     │");
-    eprintln!("│    • Wait {}{}│", format!("{timeout_seconds}s to auto-skip"), " ".repeat(27usize.saturating_sub(timeout_seconds.to_string().len())));
+    let timeout_label = format!("{timeout_seconds}s to auto-skip");
+    eprintln!("│    • Wait {}{}│", timeout_label, " ".repeat(27usize.saturating_sub(timeout_seconds.to_string().len())));
     eprintln!("└{}┘", "─".repeat(58));
     eprintln!();
     eprint!("  Password (hidden): ");
@@ -790,11 +787,10 @@ fn execute_foreground_via_env(
     };
     let output = format_process_result(&result);
 
-    if result.exit_code != 0 && result.stdout.is_empty() && result.stderr.is_empty() {
-        if result.exit_code == -1 {
+    if result.exit_code != 0 && result.stdout.is_empty() && result.stderr.is_empty()
+        && result.exit_code == -1 {
             return Err("Command execution failed (environment unavailable)".to_string());
         }
-    }
 
     Ok(output)
 }
@@ -1258,7 +1254,7 @@ fn extract_exit_code_from_output(output: &str) -> Option<i32> {
                 .and_then(|rest| rest.strip_suffix(']'))
                 .and_then(|s| s.parse::<i32>().ok())
         })
-        .last()
+        .next_back()
 }
 
 /// Register terminal tool.

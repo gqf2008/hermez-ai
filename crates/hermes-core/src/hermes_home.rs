@@ -112,4 +112,51 @@ mod tests {
         let home = get_hermes_home();
         assert!(home.ends_with(".hermes"));
     }
+
+    #[test]
+    fn test_set_hermes_home() {
+        let tmp = std::env::temp_dir().join("hermes_test_home_set");
+        // set_hermes_home uses OnceLock — if already initialized (by another test
+        // or the default path), the call returns Err with the existing value.
+        // We just verify the API is callable and behaves correctly either way.
+        match set_hermes_home(&tmp) {
+            Ok(()) => {
+                let home = get_hermes_home();
+                assert_eq!(home, tmp);
+            }
+            Err(existing) => {
+                // OnceLock was already set — existing value should be valid
+                assert!(!existing.as_os_str().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_hermes_home() {
+        // When HERMES_HOME is under the real home dir, it should display as ~/
+        let display = display_hermes_home();
+        // Either it starts with ~/ or it's an absolute path
+        assert!(display.starts_with("~/") || display.starts_with('/'));
+    }
+
+    #[test]
+    fn test_resolve_profile_path_default() {
+        let path = resolve_profile_path("default");
+        assert_eq!(path, get_hermes_home());
+    }
+
+    #[test]
+    fn test_resolve_profile_path_custom() {
+        let path = resolve_profile_path("work");
+        let expected = get_default_hermes_root().join("profiles").join("work");
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn test_get_hermes_dir_fallback() {
+        // get_hermes_dir returns current home if it exists, otherwise falls back
+        let dir = get_hermes_dir();
+        // Should at least return a path (either current or fallback)
+        assert!(!dir.as_os_str().is_empty());
+    }
 }

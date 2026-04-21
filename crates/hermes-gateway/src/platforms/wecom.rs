@@ -26,6 +26,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::dedup::MessageDeduplicator;
 
+/// Type alias for pending request/response correlation.
+type PendingResponses = Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>;
+
 /// Truncate text to at most `max_chars` characters (UTF-8 safe).
 fn truncate_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
@@ -109,7 +112,7 @@ struct WsState {
     /// Reply_req_id mapping: message_id -> req_id (for aibot_respond_msg).
     reply_req_ids: Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
     /// Pending request/response correlation: req_id -> oneshot sender.
-    pending_responses: Arc<tokio::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+    pending_responses: PendingResponses,
 }
 
 /// Delay before flushing a text batch (seconds).
@@ -608,7 +611,7 @@ impl WeComAdapter {
     ) -> Option<(String, String)> {
         // 1) Base64 inline data
         if let Some(b64_str) = media.get("base64").and_then(|v| v.as_str()) {
-            let payload = b64_str.split(',').last().unwrap_or(b64_str).trim();
+            let payload = b64_str.split(',').next_back().unwrap_or(b64_str).trim();
             let raw = general_purpose::STANDARD.decode(payload).ok()?;
 
             if kind == "image" {
@@ -691,7 +694,7 @@ impl WeComAdapter {
         }
 
         type Aes256CbcDec = cbc::Decryptor<Aes256>;
-        let iv: [u8; 16] = key[..16].try_into().unwrap();
+        let iv: [u8; 16] = key[..16].try_into().map_err(|_| "IV must be 16 bytes")?;
         let dec =
             Aes256CbcDec::new_from_slices(&key, &iv).map_err(|e| format!("Invalid key/IV: {e}"))?;
         let mut buf = encrypted.to_vec();
@@ -978,7 +981,7 @@ impl WeComAdapter {
         }
 
         let total_size = data.len();
-        let total_chunks = (total_size + Self::UPLOAD_CHUNK_SIZE - 1) / Self::UPLOAD_CHUNK_SIZE;
+        let total_chunks = total_size.div_ceil(Self::UPLOAD_CHUNK_SIZE);
         if total_chunks > Self::MAX_UPLOAD_CHUNKS {
             return Err(format!(
                 "File too large: {total_chunks} chunks exceeds maximum of {}",
@@ -1339,7 +1342,7 @@ impl WeComAdapter {
         let reply_req_ids: Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>> =
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-        let pending_responses: Arc<tokio::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>> =
+        let pending_responses: PendingResponses =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
         let ws_state = Arc::new(WsState {
@@ -1590,7 +1593,7 @@ impl WeComAdapter {
         frame: &serde_json::Value,
         event_tx: &mpsc::Sender<WeComMessageEvent>,
         reply_req_ids: &Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
-        pending_responses: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+        pending_responses: &PendingResponses,
     ) {
         // First: check if this frame is a response to a pending request
         let frame_req_id = frame

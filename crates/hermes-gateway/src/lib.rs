@@ -9,6 +9,6 @@ pub mod config;
 pub(crate) mod dedup;
 pub mod runner;
 pub(crate) mod session;
-pub(crate) mod platforms;
+pub mod platforms;
 pub(crate) mod stream_consumer;
 pub(crate) mod mcp_config;

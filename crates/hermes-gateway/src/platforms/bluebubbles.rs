@@ -18,7 +18,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tracing::{debug, error, info, warn};
@@ -138,9 +138,9 @@ pub struct BlueBubblesAdapter {
     config: BlueBubblesConfig,
     client: Client,
     dedup: MessageDeduplicator,
-    private_api_enabled: Arc<Mutex<Option<bool>>>,
-    helper_connected: Arc<Mutex<bool>>,
-    guid_cache: Arc<Mutex<HashMap<String, String>>>,
+    private_api_enabled: Arc<TokioMutex<Option<bool>>>,
+    helper_connected: Arc<TokioMutex<bool>>,
+    guid_cache: Arc<TokioMutex<HashMap<String, String>>>,
 }
 
 impl BlueBubblesAdapter {
@@ -151,9 +151,9 @@ impl BlueBubblesAdapter {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             dedup: MessageDeduplicator::new(2000, 300.0),
-            private_api_enabled: Arc::new(Mutex::new(None)),
-            helper_connected: Arc::new(Mutex::new(false)),
-            guid_cache: Arc::new(Mutex::new(HashMap::new())),
+            private_api_enabled: Arc::new(TokioMutex::new(None)),
+            helper_connected: Arc::new(TokioMutex::new(false)),
+            guid_cache: Arc::new(TokioMutex::new(HashMap::new())),
             config,
         }
     }
@@ -171,7 +171,7 @@ impl BlueBubblesAdapter {
     async fn api_get(&self, path: &str) -> Result<serde_json::Value, String> {
         let res = self
             .client
-            .get(&self.api_url(path))
+            .get(self.api_url(path))
             .send()
             .await
             .map_err(|e| format!("BlueBubbles GET {path} failed: {e}"))?;
@@ -193,7 +193,7 @@ impl BlueBubblesAdapter {
     ) -> Result<serde_json::Value, String> {
         let res = self
             .client
-            .post(&self.api_url(path))
+            .post(self.api_url(path))
             .json(payload)
             .send()
             .await
@@ -222,8 +222,8 @@ impl BlueBubblesAdapter {
         let server_data = info.get("data").and_then(|v| v.as_object()).cloned().unwrap_or_default();
         let private_api = server_data.get("private_api").and_then(|v| v.as_bool()).unwrap_or(false);
         let helper = server_data.get("helper_connected").and_then(|v| v.as_bool()).unwrap_or(false);
-        *self.private_api_enabled.lock().unwrap() = Some(private_api);
-        *self.helper_connected.lock().unwrap() = helper;
+        *self.private_api_enabled.lock().await = Some(private_api);
+        *self.helper_connected.lock().await = helper;
         info!(
             "[bluebubbles] connected to {} (private_api={private_api}, helper={helper})",
             self.config.server_url,
@@ -301,7 +301,7 @@ impl BlueBubblesAdapter {
             if let Some(wh_id) = wh.get("id").and_then(|v| v.as_str()) {
                 if let Err(e) = self
                     .client
-                    .delete(&self.api_url(&format!("/api/v1/webhook/{wh_id}")))
+                    .delete(self.api_url(&format!("/api/v1/webhook/{wh_id}")))
                     .send()
                     .await
                 {
@@ -329,7 +329,7 @@ impl BlueBubblesAdapter {
             return Some(target.to_string());
         }
         {
-            let cache = self.guid_cache.lock().unwrap();
+            let cache = self.guid_cache.lock().await;
             if let Some(guid) = cache.get(target) {
                 return Some(guid.clone());
             }
@@ -350,7 +350,7 @@ impl BlueBubblesAdapter {
                 .and_then(|v| v.as_str());
             if identifier == Some(target) {
                 if let Some(g) = guid {
-                    self.guid_cache.lock().unwrap().insert(target.to_string(), g.to_string());
+                    self.guid_cache.lock().await.insert(target.to_string(), g.to_string());
                     return Some(g.to_string());
                 }
             }
@@ -359,7 +359,7 @@ impl BlueBubblesAdapter {
                     let addr = part.get("address").and_then(|v| v.as_str()).unwrap_or("").trim();
                     if addr == target {
                         if let Some(g) = guid {
-                            self.guid_cache.lock().unwrap().insert(target.to_string(), g.to_string());
+                            self.guid_cache.lock().await.insert(target.to_string(), g.to_string());
                             return Some(g.to_string());
                         }
                     }
@@ -397,7 +397,7 @@ impl BlueBubblesAdapter {
             let guid = match self.resolve_chat_guid(chat_id).await {
                 Some(g) => g,
                 None => {
-                    let private_api = self.private_api_enabled.lock().unwrap().unwrap_or(false);
+                    let private_api = self.private_api_enabled.lock().await.unwrap_or(false);
                     if private_api && (chat_id.contains('@') || chat_id.starts_with('+')) {
                         return self.create_chat_for_handle(chat_id, &chunk).await;
                     }
@@ -456,7 +456,7 @@ impl BlueBubblesAdapter {
 
         let res = self
             .client
-            .post(&self.api_url("/api/v1/message/attachment"))
+            .post(self.api_url("/api/v1/message/attachment"))
             .multipart(form)
             .timeout(std::time::Duration::from_secs(ATTACHMENT_TIMEOUT_SECS))
             .send()
@@ -523,14 +523,14 @@ impl BlueBubblesAdapter {
     // ------------------------------------------------------------------
 
     pub async fn send_typing(&self, chat_id: &str) {
-        if !self.has_private_api() {
+        if !self.has_private_api().await {
             return;
         }
         if let Some(guid) = self.resolve_chat_guid(chat_id).await {
             let encoded = urlencoding::encode(&guid);
             let _ = self
                 .client
-                .post(&self.api_url(&format!("/api/v1/chat/{encoded}/typing")))
+                .post(self.api_url(&format!("/api/v1/chat/{encoded}/typing")))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await;
@@ -538,14 +538,14 @@ impl BlueBubblesAdapter {
     }
 
     pub async fn stop_typing(&self, chat_id: &str) {
-        if !self.has_private_api() {
+        if !self.has_private_api().await {
             return;
         }
         if let Some(guid) = self.resolve_chat_guid(chat_id).await {
             let encoded = urlencoding::encode(&guid);
             let _ = self
                 .client
-                .delete(&self.api_url(&format!("/api/v1/chat/{encoded}/typing")))
+                .delete(self.api_url(&format!("/api/v1/chat/{encoded}/typing")))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await;
@@ -557,14 +557,14 @@ impl BlueBubblesAdapter {
     // ------------------------------------------------------------------
 
     pub async fn mark_read(&self, chat_id: &str) -> bool {
-        if !self.has_private_api() {
+        if !self.has_private_api().await {
             return false;
         }
         if let Some(guid) = self.resolve_chat_guid(chat_id).await {
             let encoded = urlencoding::encode(&guid);
             match self
                 .client
-                .post(&self.api_url(&format!("/api/v1/chat/{encoded}/read")))
+                .post(self.api_url(&format!("/api/v1/chat/{encoded}/read")))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
@@ -629,7 +629,7 @@ impl BlueBubblesAdapter {
         let encoded = urlencoding::encode(att_guid);
         let resp = match self
             .client
-            .get(&self.api_url(&format!("/api/v1/attachment/{encoded}/download")))
+            .get(self.api_url(&format!("/api/v1/attachment/{encoded}/download")))
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
@@ -758,9 +758,9 @@ impl BlueBubblesAdapter {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    fn has_private_api(&self) -> bool {
-        let private_api = self.private_api_enabled.lock().unwrap().unwrap_or(false);
-        let helper = *self.helper_connected.lock().unwrap();
+    async fn has_private_api(&self) -> bool {
+        let private_api = self.private_api_enabled.lock().await.unwrap_or(false);
+        let helper = *self.helper_connected.lock().await;
         private_api && helper
     }
 }
@@ -771,9 +771,9 @@ struct WebhookState {
     config: BlueBubblesConfig,
     client: Client,
     dedup: MessageDeduplicator,
-    private_api_enabled: Arc<Mutex<Option<bool>>>,
-    helper_connected: Arc<Mutex<bool>>,
-    guid_cache: Arc<Mutex<HashMap<String, String>>>,
+    private_api_enabled: Arc<TokioMutex<Option<bool>>>,
+    helper_connected: Arc<TokioMutex<bool>>,
+    guid_cache: Arc<TokioMutex<HashMap<String, String>>>,
     handler: Arc<TokioMutex<Option<Arc<dyn MessageHandler>>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     running_sessions: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
@@ -808,9 +808,9 @@ impl WebhookState {
         adapter.mark_read(chat_id).await
     }
 
-    fn has_private_api(&self) -> bool {
-        let private_api = self.private_api_enabled.lock().unwrap().unwrap_or(false);
-        let helper = *self.helper_connected.lock().unwrap();
+    async fn has_private_api(&self) -> bool {
+        let private_api = self.private_api_enabled.lock().await.unwrap_or(false);
+        let helper = *self.helper_connected.lock().await;
         private_api && helper
     }
 
@@ -1186,6 +1186,55 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_server_url() {
+        assert_eq!(normalize_server_url("".to_string()), "");
+        assert_eq!(normalize_server_url("  ".to_string()), "");
+        assert_eq!(normalize_server_url("192.168.1.10:1234".to_string()), "http://192.168.1.10:1234");
+        assert_eq!(normalize_server_url("http://localhost:3000".to_string()), "http://localhost:3000");
+        assert_eq!(normalize_server_url("https://bb.example.com/".to_string()), "https://bb.example.com");
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let cfg = BlueBubblesConfig::default();
+        assert_eq!(cfg.webhook_host, DEFAULT_WEBHOOK_HOST);
+        assert_eq!(cfg.webhook_port, DEFAULT_WEBHOOK_PORT);
+        assert_eq!(cfg.webhook_path, DEFAULT_WEBHOOK_PATH);
+        assert!(cfg.send_read_receipts);
+    }
+
+    #[test]
+    fn test_config_is_configured() {
+        let mut cfg = BlueBubblesConfig::default();
+        assert!(!cfg.is_configured());
+        cfg.server_url = "http://localhost:3000".to_string();
+        cfg.password = "secret".to_string();
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn test_chunk_text_short() {
+        let chunks = chunk_text("hello", 100);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_text_unicode_boundary() {
+        let text = "α".repeat(20);
+        let chunks = chunk_text(&text, 10);
+        assert_eq!(chunks.len(), 4);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 10);
+        }
+        assert_eq!(chunks.concat(), text);
+    }
 }
 
 fn cache_image_from_bytes(data: &[u8], ext: &str) -> Result<String, String> {

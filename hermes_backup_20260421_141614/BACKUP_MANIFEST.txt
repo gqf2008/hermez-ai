@@ -1,0 +1,5 @@
+Hermes Agent Backup
+Timestamp: 20260421_141614
+Source: /Users/sqb/.hermes
+Items: 4
+Include Sessions: false

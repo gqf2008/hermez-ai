@@ -447,6 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spawns a full child agent conversation — requires LLM mock to run quickly"]
     async fn test_delegation_filters_blocked_toolsets() {
         let interrupt = Arc::new(AtomicBool::new(false));
         let mgr = Arc::new(SubagentManager::new(0, interrupt, 50));

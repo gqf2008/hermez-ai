@@ -1120,9 +1120,10 @@ pub fn format_message(content: &str) -> String {
     }
 
     // 1. Protect fenced code blocks
+    static FENCE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let fence_re = FENCE_RE.get_or_init(|| regex::Regex::new(r"```[\s\S]*?```").unwrap());
     let mut fences: Vec<String> = Vec::new();
     let fence_ph = "\x00FENCE";
-    let fence_re = Regex::new(r"```[\s\S]*?```").unwrap();
     let mut result = fence_re
         .replace_all(content, |caps: &regex::Captures| {
             fences.push(caps[0].to_string());
@@ -1131,9 +1132,10 @@ pub fn format_message(content: &str) -> String {
         .to_string();
 
     // 2. Protect inline code
+    static CODE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let code_re = CODE_RE.get_or_init(|| regex::Regex::new(r"`[^`\n]+`").unwrap());
     let mut codes: Vec<String> = Vec::new();
     let code_ph = "\x00CODE";
-    let code_re = Regex::new(r"`[^`\n]+`").unwrap();
     result = code_re
         .replace_all(&result, |caps: &regex::Captures| {
             codes.push(caps[0].to_string());
@@ -1143,21 +1145,26 @@ pub fn format_message(content: &str) -> String {
 
     // 3. Convert markdown bold/strikethrough
     // Bold: **text** or __text__ → *text*
-    let bold_re = Regex::new(r"\*\*(.+?)\*\*").unwrap();
+    static BOLD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let bold_re = BOLD_RE.get_or_init(|| regex::Regex::new(r"\*\*(.+?)\*\*").unwrap());
     result = bold_re.replace_all(&result, "*$1*").to_string();
-    let bold2_re = Regex::new(r"__(.+?)__").unwrap();
+    static BOLD2_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let bold2_re = BOLD2_RE.get_or_init(|| regex::Regex::new(r"__(.+?)__").unwrap());
     result = bold2_re.replace_all(&result, "*$1*").to_string();
 
     // Strikethrough: ~~text~~ → ~text~
-    let strike_re = Regex::new(r"~~(.+?)~~").unwrap();
+    static STRIKE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let strike_re = STRIKE_RE.get_or_init(|| regex::Regex::new(r"~~(.+?)~~").unwrap());
     result = strike_re.replace_all(&result, "~$1~").to_string();
 
     // 4. Convert markdown headers to bold
-    let header_re = Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap();
+    static HEADER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let header_re = HEADER_RE.get_or_init(|| regex::Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
     result = header_re.replace_all(&result, "*$1*").to_string();
 
     // 5. Convert markdown links: [text](url) → text (url)
-    let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap();
+    static LINK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let link_re = LINK_RE.get_or_init(|| regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
     result = link_re.replace_all(&result, "$1 ($2)").to_string();
 
     // 6. Restore protected sections

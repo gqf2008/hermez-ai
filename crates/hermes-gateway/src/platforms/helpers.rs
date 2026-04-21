@@ -8,8 +8,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 // ---------------------------------------------------------------------------
 // Message Deduplication
@@ -49,7 +51,7 @@ impl MessageDeduplicator {
             return false;
         }
         let now = now_secs();
-        let mut seen = self.seen.lock().unwrap();
+        let mut seen = self.seen.lock();
         if let Some(&timestamp) = seen.get(msg_id) {
             if now - timestamp < self.ttl_seconds {
                 return true;
@@ -67,7 +69,7 @@ impl MessageDeduplicator {
 
     /// Clear all tracked messages.
     pub fn clear(&self) {
-        self.seen.lock().unwrap().clear();
+        self.seen.lock().clear();
     }
 }
 
@@ -142,7 +144,7 @@ where
     ) {
         let chunk_len = event.text().len();
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock();
             if let Some(existing) = pending.get_mut(&key) {
                 let merged = format!("{}\n{}", existing.text(), event.text());
                 existing.set_text(merged);
@@ -151,12 +153,12 @@ where
             }
         }
         {
-            let mut last_lens = self.last_chunk_len.lock().unwrap();
+            let mut last_lens = self.last_chunk_len.lock();
             last_lens.insert(key.clone(), chunk_len);
         }
 
         // Cancel prior flush timer, start a new one
-        let mut tasks = self.pending_tasks.lock().unwrap();
+        let mut tasks = self.pending_tasks.lock();
         if let Some(prior) = tasks.remove(&key) {
             prior.abort();
         }
@@ -171,7 +173,7 @@ where
         let task_key = key.clone();
         let task = tokio::spawn(async move {
             let last_len = {
-                let lens = last_chunk_len.lock().unwrap();
+                let lens = last_chunk_len.lock();
                 *lens.get(&task_key).unwrap_or(&0)
             };
             let delay = if last_len >= split_threshold {
@@ -182,15 +184,15 @@ where
             tokio::time::sleep(tokio::time::Duration::from_secs_f64(delay)).await;
 
             let evt = {
-                let mut p = pending.lock().unwrap();
+                let mut p = pending.lock();
                 p.remove(&task_key)
             };
             if let Some(evt) = evt {
                 let _ = handler(evt, task_key.clone()).await;
             }
-            let mut tasks = pending_tasks.lock().unwrap();
+            let mut tasks = pending_tasks.lock();
             tasks.remove(&task_key);
-            let mut lens = last_chunk_len.lock().unwrap();
+            let mut lens = last_chunk_len.lock();
             lens.remove(&task_key);
         });
         tasks.insert(key, task);
@@ -198,13 +200,13 @@ where
 
     /// Cancel all pending flush tasks.
     pub fn cancel_all(&self) {
-        let mut tasks = self.pending_tasks.lock().unwrap();
+        let mut tasks = self.pending_tasks.lock();
         for (_, task) in tasks.drain() {
             task.abort();
         }
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         pending.clear();
-        let mut lens = self.last_chunk_len.lock().unwrap();
+        let mut lens = self.last_chunk_len.lock();
         lens.clear();
     }
 }
@@ -320,13 +322,13 @@ impl ThreadParticipationTracker {
 
     fn _save(&self) {
         let threads: Vec<String> = {
-            let set = self.threads.lock().unwrap();
+            let set = self.threads.lock();
             set.iter().cloned().collect()
         };
         let to_save = if threads.len() > self.max_tracked {
             let trimmed: Vec<String> = threads.into_iter().rev().take(self.max_tracked).collect();
             {
-                let mut set = self.threads.lock().unwrap();
+                let mut set = self.threads.lock();
                 *set = trimmed.iter().cloned().collect();
             }
             trimmed
@@ -352,7 +354,7 @@ impl ThreadParticipationTracker {
 
     /// Mark *thread_id* as participated and persist.
     pub fn mark(&self, thread_id: &str) {
-        let mut set = self.threads.lock().unwrap();
+        let mut set = self.threads.lock();
         if !set.contains(thread_id) {
             set.insert(thread_id.to_string());
             drop(set);
@@ -362,12 +364,12 @@ impl ThreadParticipationTracker {
 
     /// Check if *thread_id* has been participated in.
     pub fn contains(&self, thread_id: &str) -> bool {
-        self.threads.lock().unwrap().contains(thread_id)
+        self.threads.lock().contains(thread_id)
     }
 
     /// Clear all tracked threads.
     pub fn clear(&self) {
-        self.threads.lock().unwrap().clear();
+        self.threads.lock().clear();
         let path = Self::_state_path(&self.platform);
         let _ = std::fs::remove_file(&path);
     }
@@ -452,7 +454,9 @@ pub fn extract_images(content: &str) -> (Vec<(String, String)>, String) {
             let url = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             if extracted.contains(url) { "".to_string() } else { caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string() }
         }).into_owned();
-        cleaned = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&cleaned, "\n\n").into_owned();
+        static MULTI_NL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = MULTI_NL.get_or_init(|| regex::Regex::new(r"\n{3,}").unwrap());
+        cleaned = re.replace_all(&cleaned, "\n\n").into_owned();
         cleaned = cleaned.trim().to_string();
     }
 
@@ -469,7 +473,7 @@ pub fn extract_media(content: &str) -> (Vec<(String, bool)>, String) {
     static MEDIA_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let media_re = MEDIA_RE.get_or_init(|| {
         regex::Regex::new(
-            r#"[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a)(?=[\s`"',;:)\]}]|$)|\S+)[`"']?"#
+            r#"[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a)|\S+)[`"']?"#
         ).unwrap()
     });
 
@@ -479,8 +483,9 @@ pub fn extract_media(content: &str) -> (Vec<(String, bool)>, String) {
             let mut path = path_match.as_str().trim().to_string();
             // Strip surrounding quotes/backticks
             if path.len() >= 2 {
-                let first = path.chars().next().unwrap();
-                let last = path.chars().last().unwrap();
+                let mut chars = path.chars();
+                let first = chars.next().unwrap_or(' ');
+                let last = chars.next_back().unwrap_or(' ');
                 if first == last && (first == '`' || first == '"' || first == '\'') {
                     path = path[1..path.len()-1].trim().to_string();
                 }
@@ -494,7 +499,9 @@ pub fn extract_media(content: &str) -> (Vec<(String, bool)>, String) {
 
     if !media.is_empty() {
         cleaned = media_re.replace_all(&cleaned, "").into_owned();
-        cleaned = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&cleaned, "\n\n").into_owned();
+        static MULTI_NL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = MULTI_NL.get_or_init(|| regex::Regex::new(r"\n{3,}").unwrap());
+        cleaned = re.replace_all(&cleaned, "\n\n").into_owned();
         cleaned = cleaned.trim().to_string();
     }
 
@@ -511,7 +518,7 @@ pub fn extract_local_files(content: &str) -> (Vec<String>, String) {
     static PATH_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let path_re = PATH_RE.get_or_init(|| {
         regex::Regex::new(
-            r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpg|jpeg|gif|webp|mp4|mov|avi|mkv|webm)\b"
+            r"(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:png|jpg|jpeg|gif|webp|mp4|mov|avi|mkv|webm)\b"
         ).unwrap()
     });
 
@@ -538,6 +545,10 @@ pub fn extract_local_files(content: &str) -> (Vec<String>, String) {
             continue;
         }
         let raw = m.as_str().to_string();
+        // Skip URL paths (e.g. https://example.com/img.png)
+        if raw.starts_with("//") {
+            continue;
+        }
         let expanded = if raw.starts_with("~/") {
             std::env::var("HOME")
                 .map(|h| std::path::Path::new(&h).join(&raw[2..]).to_string_lossy().into_owned())
@@ -574,6 +585,8 @@ pub fn truncate_message(content: &str, max_length: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut remaining = content;
     let mut carry_lang: Option<String> = None;
+    static FENCE_OPEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let fence_open = FENCE_OPEN_RE.get_or_init(|| regex::Regex::new(r"```(\w*)").unwrap());
 
     while !remaining.is_empty() {
         let prefix = match &carry_lang {
@@ -602,7 +615,6 @@ pub fn truncate_message(content: &str, max_length: usize) -> Vec<String> {
         remaining = &remaining[split_at..];
 
         // Detect if we're inside a code block
-        let fence_open = regex::Regex::new(r"```(\w*)").unwrap();
         let opens: Vec<_> = fence_open.find_iter(&chunk).collect();
         let _closes = chunk.matches("```").count();
         let open_count = opens.len();
@@ -657,7 +669,7 @@ pub fn safe_url_for_log(url: &str, max_len: usize) -> String {
     }
 
     let safe = match url.parse::<reqwest::Url>() {
-        Ok(parsed) if !parsed.host().is_none() => {
+        Ok(parsed) if parsed.host().is_some() => {
             let netloc = parsed.host_str().unwrap_or("");
             let base = format!("{}://{}", parsed.scheme(), netloc);
             let path = parsed.path();
@@ -815,6 +827,253 @@ pub fn prefix_within_utf16_limit(s: &str, limit: usize) -> &str {
     &s[..byte_idx]
 }
 
+/// Return the largest codepoint offset *n* such that `len_fn(&s[..n]) <= budget`.
+///
+/// Used for truncation when *len_fn* measures length in units different
+/// from Rust char boundaries (e.g. UTF-16 code units). Falls back to
+/// binary search which is O(log n) calls to *len_fn*.
+pub fn custom_unit_truncate(s: &str, budget: usize, len_fn: impl Fn(&str) -> usize) -> usize {
+    let char_count = s.chars().count();
+    if len_fn(s) <= budget {
+        return char_count;
+    }
+    let mut lo = 0;
+    let mut hi = char_count;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let byte_offset = s.char_indices().nth(mid).map(|(i, _)| i).unwrap_or(s.len());
+        if len_fn(&s[..byte_offset]) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+// ---------------------------------------------------------------------------
+// Pending message merge (mirrors Python merge_pending_message_event)
+// ---------------------------------------------------------------------------
+
+/// Types of incoming messages.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MessageType {
+    #[default]
+    Text,
+    Location,
+    Photo,
+    Video,
+    Audio,
+    Voice,
+    Document,
+    Sticker,
+    Command,
+}
+
+/// A pending message event that can be merged with subsequent events.
+///
+/// Photo bursts / albums often arrive as multiple near-simultaneous PHOTO
+/// events. Merge those into the existing queued event so the next turn sees
+/// the whole burst.
+#[derive(Debug, Clone, Default)]
+pub struct PendingMessageEvent {
+    pub text: String,
+    pub message_type: MessageType,
+    pub media_urls: Vec<String>,
+    pub media_types: Vec<String>,
+}
+
+/// Merge an incoming event into the pending map for a session.
+///
+/// When *merge_text* is enabled, rapid follow-up TEXT events are appended
+/// instead of replacing the pending turn.
+pub fn merge_pending_message(
+    pending: &mut HashMap<String, PendingMessageEvent>,
+    session_key: &str,
+    event: PendingMessageEvent,
+    merge_text: bool,
+) {
+    if let Some(existing) = pending.get_mut(session_key) {
+        let existing_is_photo = existing.message_type == MessageType::Photo;
+        let incoming_is_photo = event.message_type == MessageType::Photo;
+        let existing_has_media = !existing.media_urls.is_empty();
+        let incoming_has_media = !event.media_urls.is_empty();
+
+        if existing_is_photo && incoming_is_photo {
+            existing.media_urls.extend(event.media_urls);
+            existing.media_types.extend(event.media_types);
+            if !event.text.is_empty() {
+                existing.text = merge_caption(Some(&existing.text), &event.text);
+            }
+            return;
+        }
+
+        if existing_has_media || incoming_has_media {
+            if incoming_has_media {
+                existing.media_urls.extend(event.media_urls);
+                existing.media_types.extend(event.media_types);
+            }
+            if !event.text.is_empty() {
+                existing.text = merge_caption(Some(&existing.text), &event.text);
+            }
+            if existing_is_photo || incoming_is_photo {
+                existing.message_type = MessageType::Photo;
+            }
+            return;
+        }
+
+        if merge_text
+            && existing.message_type == MessageType::Text
+            && event.message_type == MessageType::Text
+        {
+            if !event.text.is_empty() {
+                existing.text = if existing.text.is_empty() {
+                    event.text.clone()
+                } else {
+                    format!("{}\n{}", existing.text, event.text)
+                };
+            }
+            return;
+        }
+    }
+
+    pending.insert(session_key.to_string(), event);
+}
+
+/// Merge two caption strings, avoiding double spaces.
+pub fn merge_caption(existing: Option<&str>, new_text: &str) -> String {
+    match existing {
+        None => new_text.to_string(),
+        Some(old) => {
+            let old = old.trim_end();
+            let new = new_text.trim_start();
+            if old.is_empty() {
+                new.to_string()
+            } else if new.is_empty() {
+                old.to_string()
+            } else {
+                format!("{} {}", old, new)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Channel prompt resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a per-channel ephemeral prompt from platform config.
+///
+/// Looks up `channel_prompts` in the adapter's config extra map.
+/// Prefers an exact match on *channel_id*; falls back to *parent_id*
+/// (useful for forum threads / child channels inheriting a parent prompt).
+///
+/// Returns the prompt string, or None if no match is found. Blank/whitespace-
+/// only prompts are treated as absent.
+pub fn resolve_channel_prompt(
+    config_extra: &serde_json::Map<String, serde_json::Value>,
+    channel_id: &str,
+    parent_id: Option<&str>,
+) -> Option<String> {
+    let prompts = config_extra
+        .get("channel_prompts")
+        .and_then(|v| v.as_object())?;
+
+    for key in [Some(channel_id), parent_id] {
+        let key = key?;
+        if let Some(prompt) = prompts.get(key) {
+            let prompt = prompt.as_str()?.trim();
+            if !prompt.is_empty() {
+                return Some(prompt.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// SSRF URL safety checks (mirrors Python tools/url_safety.py)
+// ---------------------------------------------------------------------------
+
+/// Return `true` if *url* is safe to fetch (not a private/internal address).
+///
+/// Blocks requests to loopback, link-local, private, reserved, multicast,
+/// unspecified, and CGNAT (100.64.0.0/10) addresses. Also blocks known
+/// internal hostnames like `metadata.google.internal`.
+///
+/// DNS resolution failures fail closed (return `false`).
+pub fn is_safe_url(url: &str) -> bool {
+    let parsed = match url.parse::<reqwest::Url>() {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    let scheme = parsed.scheme().to_lowercase();
+
+    let hostname = match parsed.host() {
+        Some(url::Host::Domain(d)) => d.to_lowercase(),
+        Some(url::Host::Ipv4(ip)) => {
+            return !is_blocked_ip(std::net::IpAddr::V4(ip));
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            return !is_blocked_ip(std::net::IpAddr::V6(ip));
+        }
+        None => return false,
+    };
+
+    // Block known internal hostnames
+    const BLOCKED_HOSTNAMES: &[&str] = &["metadata.google.internal", "metadata.goog"];
+    if BLOCKED_HOSTNAMES.contains(&hostname.as_str()) {
+        return false;
+    }
+
+    // Trusted HTTPS hostnames that may resolve to private IPs
+    const TRUSTED_PRIVATE_IP_HOSTS: &[&str] = &["multimedia.nt.qq.com.cn"];
+    let allow_private_ip = scheme == "https" && TRUSTED_PRIVATE_IP_HOSTS.contains(&hostname.as_str());
+
+    // Try to resolve and check IP
+    let addrs = match (hostname.as_str(), 0).to_socket_addrs() {
+        Ok(addrs) => addrs.collect::<Vec<_>>(),
+        Err(_) => return false, // DNS failure — fail closed
+    };
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if !allow_private_ip && is_blocked_ip(ip) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || is_cgnat_v4(v4)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+fn is_cgnat_v4(ip: std::net::Ipv4Addr) -> bool {
+    // 100.64.0.0/10 — RFC 6598 CGNAT / Shared Address Space
+    let octets = ip.octets();
+    octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127
+}
+
 // ---------------------------------------------------------------------------
 // Media type detection
 // ---------------------------------------------------------------------------
@@ -902,7 +1161,7 @@ pub fn cache_document_from_bytes(data: &[u8], filename: &str) -> Result<PathBuf,
     if !filepath
         .canonicalize()
         .unwrap_or_else(|_| filepath.clone())
-        .starts_with(&cache_dir.canonicalize().unwrap_or_else(|_| cache_dir.clone()))
+        .starts_with(cache_dir.canonicalize().unwrap_or_else(|_| cache_dir.clone()))
     {
         return Err(format!("Path traversal rejected: {filename:?}"));
     }
@@ -1133,5 +1392,61 @@ mod tests {
         assert_eq!(prefix_within_utf16_limit("a🎉b", 1), "a");
         // Emoji fits at limit 2
         assert_eq!(prefix_within_utf16_limit("a🎉b", 3), "a🎉");
+    }
+
+    #[test]
+    fn test_custom_unit_truncate() {
+        let len_fn = |s: &str| utf16_len(s);
+        assert_eq!(custom_unit_truncate("hello world", 100, len_fn), 11);
+        assert_eq!(custom_unit_truncate("hello world", 5, len_fn), 5);
+        // CJK chars — each is 1 UTF-16 unit
+        assert_eq!(custom_unit_truncate("你好世界", 2, len_fn), 2);
+        // Emoji — 2 UTF-16 units, so limit 1 should truncate before emoji
+        assert_eq!(custom_unit_truncate("a🎉b", 1, len_fn), 1);
+        // limit 3 allows "a🎉"
+        assert_eq!(custom_unit_truncate("a🎉b", 3, len_fn), 2); // "a🎉" = 3 units, "a🎉b" = 4 units
+    }
+
+    #[test]
+    fn test_merge_caption() {
+        assert_eq!(merge_caption(None, "new"), "new");
+        assert_eq!(merge_caption(Some("old"), "new"), "old new");
+        assert_eq!(merge_caption(Some("old "), " new"), "old new");
+    }
+
+    #[test]
+    fn test_resolve_channel_prompt() {
+        let mut extra = serde_json::json!({
+            "channel_prompts": {
+                "ch-1": "prompt-one",
+                "ch-2": "  prompt-two  ",
+            }
+        });
+        let map = extra.as_object_mut().unwrap();
+        assert_eq!(resolve_channel_prompt(map, "ch-1", None), Some("prompt-one".to_string()));
+        assert_eq!(resolve_channel_prompt(map, "ch-2", None), Some("prompt-two".to_string()));
+        assert_eq!(resolve_channel_prompt(map, "ch-3", Some("ch-1")), Some("prompt-one".to_string()));
+        assert_eq!(resolve_channel_prompt(map, "ch-3", None), None);
+    }
+
+    #[test]
+    fn test_is_safe_url_blocks_private() {
+        assert!(!is_safe_url("http://localhost:8080"));
+        assert!(!is_safe_url("http://127.0.0.1"));
+        assert!(!is_safe_url("http://192.168.1.1"));
+        assert!(!is_safe_url("http://10.0.0.1"));
+        assert!(!is_safe_url("http://172.16.0.1"));
+        assert!(!is_safe_url("http://169.254.169.254"));
+        assert!(!is_safe_url("http://[::1]"));
+        assert!(!is_safe_url("http://metadata.google.internal"));
+    }
+
+    #[test]
+    fn test_is_safe_url_allows_public() {
+        // Public IP addresses (no DNS lookup required)
+        assert!(is_safe_url("https://8.8.8.8"));
+        assert!(is_safe_url("http://1.1.1.1"));
+        // Trusted private-IP host allowed over HTTPS
+        assert!(is_safe_url("https://multimedia.nt.qq.com.cn/file"));
     }
 }

@@ -130,15 +130,15 @@ fn load_jobs() -> Result<Vec<CronJob>, String> {
 
     // Try new object format first
     match serde_json::from_str::<JobsFile>(&content) {
-        Ok(wrapper) => return Ok(wrapper.jobs),
+        Ok(wrapper) => Ok(wrapper.jobs),
         Err(e1) => {
             // Fall back to legacy array format
             match serde_json::from_str::<Vec<CronJob>>(&content) {
-                Ok(jobs) => return Ok(jobs),
+                Ok(jobs) => Ok(jobs),
                 Err(e2) => {
-                    return Err(format!(
+                    Err(format!(
                         "Failed to parse jobs file: object format: {e1}; array format: {e2}"
-                    ));
+                    ))
                 }
             }
         }

@@ -692,7 +692,7 @@ pub fn format_context_pressure(
 ) -> String {
     let pct_int = (compaction_progress * 100.0).min(100.0) as usize;
     let filled = (compaction_progress * BAR_WIDTH as f64).min(BAR_WIDTH as f64) as usize;
-    let bar = BAR_FILLED.repeat(filled) + &BAR_EMPTY.repeat(BAR_WIDTH - filled);
+    let bar = BAR_FILLED.repeat(filled) + BAR_EMPTY.repeat(BAR_WIDTH - filled).as_str();
 
     let threshold_k = if threshold_tokens >= 1000 {
         format!("{}k", threshold_tokens / 1000)
@@ -721,7 +721,7 @@ pub fn format_context_pressure_gateway(
 ) -> String {
     let pct_int = (compaction_progress * 100.0).min(100.0) as usize;
     let filled = (compaction_progress * BAR_WIDTH as f64).min(BAR_WIDTH as f64) as usize;
-    let bar = BAR_FILLED.repeat(filled) + &BAR_EMPTY.repeat(BAR_WIDTH - filled);
+    let bar = BAR_FILLED.repeat(filled) + BAR_EMPTY.repeat(BAR_WIDTH - filled).as_str();
 
     let threshold_pct_int = (threshold_percent * 100.0) as usize;
 

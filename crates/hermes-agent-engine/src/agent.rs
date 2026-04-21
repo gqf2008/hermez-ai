@@ -24,13 +24,14 @@ pub mod control;
 
 // Re-export public types from sub-modules
 pub use types::{
-    ActivityCallback, AgentConfig, FallbackProvider, InterimAssistantCallback,
+    ActivityCallback, AgentConfig, ApprovalHandler, FallbackProvider, InterimAssistantCallback,
     PreLlmHook, PreLlmHookResult, PrimaryRuntime, ReasoningCallback,
     StatusCallback, StreamCallback, ToolGenCallback, TurnResult, TurnUsage,
 };
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::collections::HashSet;
 use parking_lot::Mutex;
 
 use serde_json::Value;
@@ -150,6 +151,10 @@ pub struct AIAgent {
     last_flushed_db_idx: usize,
     /// WASM plugins loaded at startup (Phase 1).
     wasm_plugins: Vec<Arc<crate::plugin_system::WasmPluginRuntime>>,
+    /// Optional approval handler for interactive command approval.
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    /// Session-scoped approval allowlist (command patterns approved with "approve_session").
+    session_allowlist: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AIAgent {
@@ -250,7 +255,14 @@ impl AIAgent {
             persist_session,
             last_flushed_db_idx: 0,
             wasm_plugins,
+            approval_handler: None,
+            session_allowlist: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    /// Set the approval handler for interactive command approval.
+    pub fn set_approval_handler(&mut self, handler: Option<Arc<dyn ApprovalHandler>>) {
+        self.approval_handler = handler;
     }
 
     /// Invoke a lifecycle hook on all loaded WASM plugins.
@@ -697,7 +709,7 @@ impl AIAgent {
                         // sequential for interactive/dependent tools.
                         // Mirrors Python `_execute_tool_calls()` dispatch
                         // (run_agent.py:7163).
-                        let tool_calls_json: Vec<serde_json::Value> = deduped.iter().cloned().collect();
+                        let tool_calls_json: Vec<serde_json::Value> = deduped.to_vec();
                         let mut pre_ctx = std::collections::HashMap::new();
                         pre_ctx.insert("tool_calls".into(), serde_json::json!(tool_calls_json));
                         global_hooks().invoke("pre_tool_call", &pre_ctx);
@@ -2034,9 +2046,167 @@ impl AIAgent {
             self.iters_since_skill = 0;
         }
 
+        // Check session allowlist — auto-approve previously approved commands
+        let allowlisted = {
+            let list = self.session_allowlist.lock();
+            if let Some(cmd) = args.get("command").and_then(Value::as_str) {
+                list.contains(cmd) || list.iter().any(|pattern| cmd.starts_with(pattern))
+            } else {
+                false
+            }
+        };
+
         // Dispatch through the tool registry
-        match self.tool_registry.dispatch(tool_name, args.clone()) {
+        let dispatch_args = if allowlisted {
+            let mut a = args.clone();
+            if let Some(obj) = a.as_object_mut() {
+                obj.insert("force".to_string(), serde_json::json!(true));
+            }
+            a
+        } else {
+            args.clone()
+        };
+
+        match self.tool_registry.dispatch(tool_name, dispatch_args) {
             Ok(result) => {
+                // Check if the tool is waiting for user approval (e.g., terminal
+                // security guard blocked a dangerous command).
+                if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
+                    if parsed.get("status").and_then(Value::as_str) == Some("approval_required") {
+                        if let Some(ref handler) = self.approval_handler {
+                            let command = parsed.get("command").and_then(Value::as_str).unwrap_or("");
+                            let description = parsed
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("command flagged");
+                            tracing::info!(
+                                "Approval required for tool '{}' (command='{}'): {}",
+                                tool_name,
+                                command,
+                                description
+                            );
+                            match handler.request_approval(command, description).await {
+                                Ok(choice)
+                                    if choice == "approve"
+                                        || choice == "approve_once"
+                                        || choice == "approved" =>
+                                {
+                                    // Re-run the tool with force=true to bypass the guard.
+                                    let mut approved_args = args.clone();
+                                    if let Some(obj) = approved_args.as_object_mut() {
+                                        obj.insert("force".to_string(), serde_json::json!(true));
+                                    }
+                                    match self.tool_registry.dispatch(tool_name, approved_args) {
+                                        Ok(new_result) => {
+                                            return serde_json::json!({
+                                                "role": "tool",
+                                                "content": new_result,
+                                                "tool_call_id": tool_call_id
+                                            });
+                                        }
+                                        Err(e) => {
+                                            return serde_json::json!({
+                                                "role": "tool",
+                                                "content": format!(
+                                                    "Error executing approved tool {}: {}",
+                                                    tool_name, e
+                                                ),
+                                                "tool_call_id": tool_call_id
+                                            });
+                                        }
+                                    }
+                                }
+                                Ok(choice)
+                                    if choice == "approve_session"
+                                        || choice == "approve_always" =>
+                                {
+                                    // Add command to session allowlist so future
+                                    // invocations auto-approve.
+                                    if let Some(cmd) =
+                                        parsed.get("command").and_then(Value::as_str)
+                                    {
+                                        if !cmd.is_empty() {
+                                            self.session_allowlist.lock().insert(cmd.to_string());
+                                            tracing::info!(
+                                                "Added '{}' to session approval allowlist",
+                                                cmd
+                                            );
+                                        }
+                                    }
+                                    if choice == "approve_always" {
+                                        // Persist to disk for cross-session reuse.
+                                        if let Some(cmd) =
+                                            parsed.get("command").and_then(Value::as_str)
+                                        {
+                                            if let Ok(home) = std::env::var("HERMES_HOME")
+                                                .or_else(|_| {
+                                                    std::env::var("HOME")
+                                                        .map(|h| format!("{h}/.hermes"))
+                                                })
+                                            {
+                                                let path =
+                                                    std::path::Path::new(&home)
+                                                        .join("approval_allowlist.json");
+                                                let mut list: Vec<String> =
+                                                    std::fs::read_to_string(&path)
+                                                        .ok()
+                                                        .and_then(|s| serde_json::from_str(&s).ok())
+                                                        .unwrap_or_default();
+                                                if !list.contains(&cmd.to_string()) {
+                                                    list.push(cmd.to_string());
+                                                    if let Ok(bytes) =
+                                                        serde_json::to_vec_pretty(&list)
+                                                    {
+                                                        let _ = std::fs::write(&path, bytes);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut approved_args = args.clone();
+                                    if let Some(obj) = approved_args.as_object_mut() {
+                                        obj.insert("force".to_string(), serde_json::json!(true));
+                                    }
+                                    match self.tool_registry.dispatch(tool_name, approved_args) {
+                                        Ok(new_result) => {
+                                            return serde_json::json!({
+                                                "role": "tool",
+                                                "content": new_result,
+                                                "tool_call_id": tool_call_id
+                                            });
+                                        }
+                                        Err(e) => {
+                                            return serde_json::json!({
+                                                "role": "tool",
+                                                "content": format!(
+                                                    "Error executing approved tool {}: {}",
+                                                    tool_name, e
+                                                ),
+                                                "tool_call_id": tool_call_id
+                                            });
+                                        }
+                                    }
+                                }
+                                Ok(choice) if choice == "deny" || choice == "denied" => {
+                                    return serde_json::json!({
+                                        "role": "tool",
+                                        "content": format!(
+                                            "User denied execution of command: {}",
+                                            command
+                                        ),
+                                        "tool_call_id": tool_call_id
+                                    });
+                                }
+                                Ok(other) => {
+                                    tracing::warn!("Unexpected approval response: {}", other);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Approval handler error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
                 serde_json::json!({
                     "role": "tool",
                     "content": result,
@@ -2483,6 +2653,86 @@ impl AIAgent {
 
         // Sort by original index to maintain order
         indexed_results.sort_by_key(|(idx, _)| *idx);
+
+        // Post-process: handle approval_required results sequentially.
+        // Concurrent tasks can't hold `&self`, so we fix up here.
+        if let Some(ref handler) = self.approval_handler {
+            for (index, result) in &mut indexed_results {
+                let content = result.get("content").and_then(Value::as_str).unwrap_or("");
+                if let Ok(parsed) = serde_json::from_str::<Value>(content) {
+                    if parsed.get("status").and_then(Value::as_str) != Some("approval_required") {
+                        continue;
+                    }
+                    let tool_call_id = result.get("tool_call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let tc = tool_calls_clone.get(*index);
+                    let tool_name = tc
+                        .and_then(|t| t.get("function").and_then(|f| f.get("name")).and_then(Value::as_str))
+                        .unwrap_or("unknown");
+                    let args_str = tc
+                        .and_then(|t| t.get("function").and_then(|f| f.get("arguments")).and_then(Value::as_str))
+                        .unwrap_or("{}");
+                    let args: Value = serde_json::from_str(args_str).unwrap_or_default();
+                    let command = parsed.get("command").and_then(Value::as_str).unwrap_or("");
+                    let description = parsed.get("description").and_then(Value::as_str).unwrap_or("command flagged");
+
+                    tracing::info!(
+                        "Concurrent tool '{}' flagged approval_required (command='{}')",
+                        tool_name, command
+                    );
+
+                    match handler.request_approval(command, description).await {
+                        Ok(choice)
+                            if matches!(
+                                choice.as_str(),
+                                "approve" | "approve_once" | "approved"
+                                    | "approve_session" | "approve_always"
+                            ) =>
+                        {
+                            // Add to session allowlist if session/permanent approval.
+                            if matches!(choice.as_str(), "approve_session" | "approve_always")
+                                && !command.is_empty()
+                            {
+                                self.session_allowlist.lock().insert(command.to_string());
+                            }
+                            let mut approved_args = args;
+                            if let Some(obj) = approved_args.as_object_mut() {
+                                obj.insert("force".to_string(), serde_json::json!(true));
+                            }
+                            match self.tool_registry.dispatch(tool_name, approved_args) {
+                                Ok(new_result) => {
+                                    *result = serde_json::json!({
+                                        "role": "tool",
+                                        "content": new_result,
+                                        "tool_call_id": tool_call_id
+                                    });
+                                }
+                                Err(e) => {
+                                    *result = serde_json::json!({
+                                        "role": "tool",
+                                        "content": format!("Error executing approved tool {}: {}", tool_name, e),
+                                        "tool_call_id": tool_call_id
+                                    });
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Denied or unexpected response.
+                            *result = serde_json::json!({
+                                "role": "tool",
+                                "content": format!("User denied execution of command: {}", command),
+                                "tool_call_id": tool_call_id
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("Approval handler error (concurrent): {}", e);
+                        }
+                    }
+                }
+            }
+        }
 
         // Extract just the result values
         indexed_results.into_iter().map(|(_, result)| result).collect()

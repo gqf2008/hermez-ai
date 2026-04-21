@@ -290,8 +290,8 @@ impl SignalAdapter {
                             continue;
                         }
                         // SSE data line
-                        if line.starts_with("data:") {
-                            let data_str = line[5..].trim();
+                        if let Some(data_str) = line.strip_prefix("data:") {
+                            let data_str = data_str.trim();
                             if data_str.is_empty() {
                                 continue;
                             }
@@ -437,7 +437,10 @@ impl SignalAdapter {
                 debug!("Signal: ignoring group message (no SIGNAL_GROUP_ALLOWED_USERS)");
                 return Ok(());
             }
-            let gid = group_id.unwrap();
+            let gid = match group_id {
+                Some(g) => g,
+                None => return Ok(()),
+            };
             if !self.config.group_allowed_users.contains("*") && !self.config.group_allowed_users.contains(gid) {
                 debug!("Signal: group {} not in allowlist", &gid[..gid.len().min(8)]);
                 return Ok(());
@@ -445,15 +448,14 @@ impl SignalAdapter {
         }
 
         // User authorization for DMs
-        if !is_group && !self.config.allow_all_users && !self.config.allowed_users.is_empty() {
-            if !self.config.allowed_users.iter().any(|u| u == &sender) {
+        if !is_group && !self.config.allow_all_users && !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.iter().any(|u| u == &sender) {
                 warn!("Signal: unauthorized user {}", redact_phone(&sender));
                 return Ok(());
             }
-        }
 
         let chat_id = if is_group {
-            format!("group:{}", group_id.unwrap())
+            format!("group:{}", group_id.unwrap_or_default())
         } else {
             sender.clone()
         };
@@ -479,20 +481,21 @@ impl SignalAdapter {
             for att in attachments {
                 let att_id = att.get("id").and_then(|v| v.as_str());
                 let att_size = att.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                if att_id.is_none() {
-                    continue;
-                }
+                let att_id = match att_id {
+                    Some(id) => id,
+                    None => continue,
+                };
                 if att_size > SIGNAL_MAX_ATTACHMENT_SIZE as u64 {
                     warn!("Signal: attachment too large ({att_size} bytes), skipping");
                     continue;
                 }
-                match self.fetch_attachment(att_id.unwrap()).await {
+                match self.fetch_attachment(att_id).await {
                     Ok((path, mime)) => {
                         media_urls.push(path);
                         media_types.push(mime);
                     }
                     Err(e) => {
-                        warn!("Signal: failed to fetch attachment {}: {e}", att_id.unwrap());
+                        warn!("Signal: failed to fetch attachment {att_id}: {e}");
                     }
                 }
             }
@@ -622,8 +625,8 @@ impl SignalAdapter {
             params.insert("account".to_string(), Value::String(self.config.phone_number.clone()));
             params.insert("message".to_string(), Value::String(chunk));
 
-            if chat_id.starts_with("group:") {
-                params.insert("groupId".to_string(), Value::String(chat_id[6..].to_string()));
+            if let Some(group_id) = chat_id.strip_prefix("group:") {
+                params.insert("groupId".to_string(), Value::String(group_id.to_string()));
             } else {
                 params.insert("recipient".to_string(), Value::Array(vec![Value::String(chat_id.to_string())]));
             }
@@ -648,8 +651,8 @@ impl SignalAdapter {
         params.insert("message".to_string(), Value::String(caption.unwrap_or("").to_string()));
         params.insert("attachments".to_string(), Value::Array(vec![Value::String(file_path_str)]));
 
-        if chat_id.starts_with("group:") {
-            params.insert("groupId".to_string(), Value::String(chat_id[6..].to_string()));
+        if let Some(group_id) = chat_id.strip_prefix("group:") {
+            params.insert("groupId".to_string(), Value::String(group_id.to_string()));
         } else {
             params.insert("recipient".to_string(), Value::Array(vec![Value::String(chat_id.to_string())]));
         }

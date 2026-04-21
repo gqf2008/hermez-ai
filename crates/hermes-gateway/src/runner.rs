@@ -15,6 +15,43 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
+/// Registry for pending user approvals (gateway-level blocking).
+///
+/// When an agent tool requires user approval (e.g. dangerous shell command),
+/// the agent engine registers a pending approval keyed by session_key.
+/// Platform adapters (Slack, Feishu) resolve the approval when the user
+/// clicks an approval card button.
+#[derive(Clone, Default)]
+pub struct ApprovalRegistry {
+    pending: Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<String>>>>,
+}
+
+impl ApprovalRegistry {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register a pending approval. Returns a receiver that resolves when the user makes a choice.
+    pub fn register(&self, session_key: &str) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().insert(session_key.to_string(), tx);
+        rx
+    }
+
+    /// Resolve a pending approval with the user's choice.
+    /// Returns true if a pending approval was found and signaled.
+    pub fn resolve(&self, session_key: &str, choice: &str) -> bool {
+        if let Some(tx) = self.pending.lock().remove(session_key) {
+            let _ = tx.send(choice.to_string());
+            true
+        } else {
+            false
+        }
+    }
+}
+
 use crate::config::{Platform, PlatformConfig};
 use crate::platforms::api_server::{ApiServerAdapter, ApiServerConfig, ApiServerState};
 use crate::session::{SessionSource, SessionStore, build_session_key};
@@ -94,6 +131,29 @@ pub trait MessageHandler: Send + Sync + 'static {
     /// Mirrors Python PR a8b7db35 — immediate interrupt on user message.
     fn interrupt(&self, _chat_id: &str, _new_message: &str) {
         // no-op by default
+    }
+
+    /// Run the agent with a custom prompt (used by platform-specific flows
+    /// like Feishu document comments that need special toolsets and prompts).
+    ///
+    /// Default implementation returns an error; handlers that support
+    /// custom-prompt execution should override this.
+    async fn run_with_prompt(&self, _prompt: &str) -> Result<String, String> {
+        Err("Custom prompt execution not supported by this handler".to_string())
+    }
+
+    /// Register a pending approval for the given session key.
+    /// Returns a receiver that resolves when the user makes a choice.
+    /// Default is None; handlers that support approval blocking should override.
+    fn register_approval(&self, _session_key: &str) -> Option<oneshot::Receiver<String>> {
+        None
+    }
+
+    /// Resolve a pending approval with the user's choice.
+    /// Returns true if a pending approval was found and signaled.
+    /// Default is false; handlers that support approval blocking should override.
+    fn resolve_approval(&self, _session_key: &str, _choice: &str) -> bool {
+        false
     }
 }
 
@@ -202,6 +262,8 @@ pub struct GatewayRunner {
     busy_ack_ts: Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     /// Session store for persistence and auto-reset.
     session_store: Arc<SessionStore>,
+    /// Gateway-level approval registry for blocking dangerous tool executions.
+    approval_registry: ApprovalRegistry,
     /// Per-chat model overrides (set via /model command).
     per_chat_model: Arc<parking_lot::Mutex<HashMap<String, String>>>,
 }
@@ -252,12 +314,28 @@ impl GatewayRunner {
                 crate::config::GatewayConfig::default(),
             )),
             per_chat_model: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            approval_registry: ApprovalRegistry::new(),
         }
     }
 
     /// Set the message handler (agent engine).
     pub async fn set_message_handler(&self, handler: Arc<dyn MessageHandler>) {
         *self.message_handler.lock().await = Some(handler);
+    }
+
+    /// Get a clone of the shared approval registry.
+    pub fn approval_registry(&self) -> ApprovalRegistry {
+        self.approval_registry.clone()
+    }
+
+    /// Get the Slack adapter if configured.
+    pub fn slack_adapter(&self) -> Option<Arc<crate::platforms::slack::SlackAdapter>> {
+        self.slack_adapter.clone()
+    }
+
+    /// Get the Feishu adapter if configured.
+    pub fn feishu_adapter(&self) -> Option<Arc<crate::platforms::feishu::FeishuAdapter>> {
+        self.feishu_adapter.clone()
     }
 
     /// Initialize platform adapters based on config.
@@ -272,7 +350,7 @@ impl GatewayRunner {
                     let feishu_config = FeishuConfig::from_env();
                     if !feishu_config.app_id.is_empty() && !feishu_config.app_secret.is_empty() {
                         info!("Initializing Feishu adapter...");
-                        self.feishu_adapter = Some(Arc::new(FeishuAdapter::new(feishu_config)));
+                        self.feishu_adapter = Some(Arc::new(FeishuAdapter::new(feishu_config, self.approval_registry.clone())));
                     } else {
                         warn!("Feishu enabled but not configured (missing FEISHU_APP_ID/SECRET)");
                     }
@@ -308,7 +386,7 @@ impl GatewayRunner {
                     let slack_config = SlackConfig::from_env();
                     if !slack_config.bot_token.is_empty() && !slack_config.signing_secret.is_empty() {
                         info!("Initializing Slack adapter...");
-                        self.slack_adapter = Some(Arc::new(SlackAdapter::new(slack_config)));
+                        self.slack_adapter = Some(Arc::new(SlackAdapter::new(slack_config, self.approval_registry.clone())));
                     } else {
                         warn!("Slack enabled but not configured (missing SLACK_BOT_TOKEN or SLACK_SIGNING_SECRET)");
                     }
@@ -488,6 +566,12 @@ impl GatewayRunner {
     /// Start the gateway main loop.
     pub async fn run(&mut self) -> Result<(), String> {
         self.running.store(true, Ordering::SeqCst);
+
+        // Enable gateway ask mode so dangerous tools return "approval_required"
+        // instead of hard-blocking. The approval handler in the CLI/GatewayRunner
+        // will then present the choice to the user.
+        std::env::set_var("HERMES_GATEWAY_ASK_MODE", "1");
+
         info!("Gateway starting...");
 
         // Spawn platform-specific polling tasks
@@ -904,7 +988,15 @@ impl GatewayRunner {
                 FeishuConnectionMode::WebSocket => {
                     let ws_client = crate::platforms::feishu_ws::FeishuWsClient::new(adapter.config.clone());
                     let adapter = adapter.clone();
+                    let handler = self.message_handler.clone();
                     let handle = tokio::spawn(async move {
+                        // Wire the global message handler into the adapter so that
+                        // platform-specific flows (e.g. drive comment replies) can
+                        // invoke the agent via run_with_prompt.
+                        {
+                            let guard = handler.lock().await;
+                            *adapter.message_handler.lock().await = guard.clone();
+                        }
                         let callback: crate::platforms::feishu_ws::WsEventCallback = std::sync::Arc::new(move |event: serde_json::Value| {
                             let adapter = adapter.clone();
                             tokio::spawn(async move {

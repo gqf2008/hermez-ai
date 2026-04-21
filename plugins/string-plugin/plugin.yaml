@@ -1,0 +1,17 @@
+name: string-plugin
+version: 0.1.0
+description: String processing utilities — reverse, count, replace, split, case convert, trim, base64
+author: Hermes Team
+component_entry: plugin.component.wasm
+provides_hooks:
+  - on_session_start
+  - on_session_end
+provides_tools:
+  - string_reverse
+  - string_count
+  - string_replace
+  - string_split
+  - string_case
+  - string_trim
+  - string_base64
+manifest_version: 1

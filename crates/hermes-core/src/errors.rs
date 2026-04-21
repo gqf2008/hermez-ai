@@ -193,3 +193,101 @@ impl From<&str> for HermesError {
         Self::new(ErrorCategory::InternalError, err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_new() {
+        let err = HermesError::new(ErrorCategory::ConfigError, "bad config");
+        assert_eq!(err.category, ErrorCategory::ConfigError);
+        assert_eq!(err.message, "bad config");
+        assert!(err.source.is_none());
+        assert!(err.api_details.is_none());
+    }
+
+    #[test]
+    fn test_error_with_source() {
+        let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err = HermesError::with_source(ErrorCategory::FileError, "read failed", inner.into());
+        assert_eq!(err.category, ErrorCategory::FileError);
+        assert!(err.source.is_some());
+    }
+
+    #[test]
+    fn test_error_api_with_details() {
+        let details = ApiErrorDetails {
+            status_code: Some(429),
+            provider: "openrouter".to_string(),
+            model: "gpt-4o".to_string(),
+            retryable: true,
+            rotate_credential: false,
+            fallback_provider: true,
+        };
+        let err = HermesError::api(ErrorCategory::ApiError, "rate limited", details);
+        assert!(err.is_retryable());
+        assert!(!err.should_rotate());
+        assert!(err.should_fallback());
+    }
+
+    #[test]
+    fn test_error_retryable_fallback_without_api_details() {
+        let network_err = HermesError::new(ErrorCategory::NetworkError, "timeout");
+        assert!(network_err.is_retryable());
+        assert!(!network_err.should_rotate());
+        assert!(!network_err.should_fallback());
+
+        let api_err = HermesError::new(ErrorCategory::ApiError, "bad request");
+        assert!(api_err.is_retryable());
+        assert!(api_err.should_fallback());
+
+        let config_err = HermesError::new(ErrorCategory::ConfigError, "missing");
+        assert!(!config_err.is_retryable());
+        assert!(!config_err.should_fallback());
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = HermesError::new(ErrorCategory::ToolError, "hammer missed");
+        let s = format!("{err}");
+        assert_eq!(s, "[Tool Error] hammer missed");
+    }
+
+    #[test]
+    fn test_error_category_display() {
+        assert_eq!(format!("{}", ErrorCategory::ApiError), "API Error");
+        assert_eq!(format!("{}", ErrorCategory::AuthError), "Auth Error");
+        assert_eq!(format!("{}", ErrorCategory::InternalError), "Internal Error");
+    }
+
+    #[test]
+    fn test_from_anyhow() {
+        let anyhow_err = anyhow::anyhow!("something went wrong");
+        let err: HermesError = anyhow_err.into();
+        assert_eq!(err.category, ErrorCategory::InternalError);
+        assert!(err.message.contains("something went wrong"));
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: HermesError = io_err.into();
+        assert_eq!(err.category, ErrorCategory::InternalError);
+        assert!(err.message.contains("denied"));
+    }
+
+    #[test]
+    fn test_from_string() {
+        let err: HermesError = "plain string error".to_string().into();
+        assert_eq!(err.category, ErrorCategory::InternalError);
+        assert_eq!(err.message, "plain string error");
+    }
+
+    #[test]
+    fn test_from_str() {
+        let err: HermesError = "slice error".into();
+        assert_eq!(err.category, ErrorCategory::InternalError);
+        assert_eq!(err.message, "slice error");
+    }
+}

@@ -99,3 +99,69 @@ pub const DEVELOPER_ROLE_MODELS: &[&str] = &["gpt-5", "codex"];
 /// Models that need tool-use enforcement guidance.
 pub const TOOL_ENFORCEMENT_MODEL_FAMILIES: &[&str] =
     &["gpt", "codex", "gemini", "gemma", "grok"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_agent_identity_non_empty() {
+        assert!(!DEFAULT_AGENT_IDENTITY.is_empty());
+        assert!(DEFAULT_AGENT_IDENTITY.contains("Hermes Agent"));
+    }
+
+    #[test]
+    fn test_iteration_limits_sane() {
+        assert!(DEFAULT_MAX_ITERATIONS > 0);
+        assert!(DEFAULT_DELEGATION_MAX_ITERATIONS > 0);
+        assert!(DEFAULT_DELEGATION_MAX_ITERATIONS <= DEFAULT_MAX_ITERATIONS);
+    }
+
+    #[test]
+    fn test_delegation_depth_and_concurrency() {
+        assert_eq!(MAX_DELEGATION_DEPTH, 2);
+        assert!(MAX_CONCURRENT_CHILDREN > 0);
+        assert!(MAX_CONCURRENT_TOOL_CALLS >= MAX_CONCURRENT_CHILDREN);
+    }
+
+    #[test]
+    fn test_compression_constants() {
+        assert!(COMPRESSION_THRESHOLD_PCT > 0.0 && COMPRESSION_THRESHOLD_PCT <= 1.0);
+        assert!(COMPRESSION_TARGET_RATIO > 0.0 && COMPRESSION_TARGET_RATIO <= 1.0);
+        assert!(COMPRESSION_PROTECT_FIRST_N >= 1);
+        assert!(COMPRESSION_MIN_TAIL_MESSAGES >= 1);
+    }
+
+    #[test]
+    fn test_context_file_ratios_sum() {
+        assert!(
+            (CONTEXT_FILE_HEAD_RATIO + CONTEXT_FILE_TAIL_RATIO) <= 1.0,
+            "head + tail ratios should not exceed 1.0"
+        );
+    }
+
+    #[test]
+    fn test_supported_platforms_nonempty() {
+        assert!(!SUPPORTED_PLATFORMS.is_empty());
+        assert!(SUPPORTED_PLATFORMS.contains(&"cli"));
+        assert!(SUPPORTED_PLATFORMS.contains(&"telegram"));
+    }
+
+    #[test]
+    fn test_session_key_prefix() {
+        assert_eq!(SESSION_KEY_PREFIX, "agent:main");
+        assert_eq!(SESSION_DB_FILE, "sessions.db");
+    }
+
+    #[test]
+    fn test_developer_role_models() {
+        assert!(DEVELOPER_ROLE_MODELS.contains(&"gpt-5"));
+        assert!(DEVELOPER_ROLE_MODELS.contains(&"codex"));
+    }
+
+    #[test]
+    fn test_tool_enforcement_families() {
+        assert!(TOOL_ENFORCEMENT_MODEL_FAMILIES.contains(&"gpt"));
+        assert!(TOOL_ENFORCEMENT_MODEL_FAMILIES.contains(&"gemini"));
+    }
+}

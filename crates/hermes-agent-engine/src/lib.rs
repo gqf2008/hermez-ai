@@ -16,6 +16,7 @@ pub(crate) mod self_evolution;
 pub(crate) mod skill_commands;
 pub(crate) mod skill_utils;
 pub(crate) mod smart_model_routing;
+pub mod state_memory;
 pub(crate) mod subagent;
 pub(crate) mod title_generator;
 pub(crate) mod trajectory;
@@ -29,6 +30,7 @@ pub use agent::types::{
 };
 pub use memory_manager::{build_memory_context_block, sanitize_context as sanitize_memory_context, MemoryManager};
 pub use memory_provider::MemoryProvider;
+pub use state_memory::HermesStateMemoryProvider;
 pub use message_loop::{MessageLoop, MessageResult, PlatformMessage};
 pub use smart_model_routing::{
     choose_cheap_model_route, parse_routing_config, resolve_turn_route, RoutingConfig, TurnRoute,

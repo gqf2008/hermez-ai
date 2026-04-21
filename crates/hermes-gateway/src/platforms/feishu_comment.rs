@@ -10,18 +10,17 @@
 //!   2. Add OK reaction
 //!   3. Parallel fetch: doc meta + comment details (batch_query)
 //!   4. Branch on is_whole:
-//!        Whole -> list whole comments timeline
-//!        Local  -> list comment thread replies
+//!      Whole -> list whole comments timeline
+//!      Local -> list comment thread replies
 //!   5. Build prompt (local or whole)
 //!   6. Run agent -> generate reply
 //!   7. Route reply:
-//!        Whole -> add_whole_comment
-//!        Local  -> reply_to_comment (fallback to add_whole_comment on 1069302)
+//!      Whole -> add_whole_comment
+//!      Local -> reply_to_comment (fallback to add_whole_comment on 1069302)
 
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -1192,15 +1191,15 @@ struct SessionEntry {
     last_access: Instant,
 }
 
-static SESSION_CACHE: std::sync::LazyLock<Mutex<HashMap<String, SessionEntry>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static SESSION_CACHE: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, SessionEntry>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 fn _session_key(file_type: &str, file_token: &str) -> String {
     format!("comment-doc:{file_type}:{file_token}")
 }
 
 fn _load_session_history(key: &str) -> Vec<HashMap<String, String>> {
-    let mut cache = SESSION_CACHE.lock().unwrap();
+    let mut cache = SESSION_CACHE.lock();
     let entry = match cache.get(key) {
         Some(e) => e,
         None => return Vec::new(),
@@ -1230,7 +1229,7 @@ fn _save_session_history(key: &str, messages: &[HashMap<String, String>]) {
     } else {
         &cleaned[..]
     };
-    let mut cache = SESSION_CACHE.lock().unwrap();
+    let mut cache = SESSION_CACHE.lock();
     cache.insert(
         key.to_string(),
         SessionEntry {
@@ -1247,18 +1246,30 @@ fn _save_session_history(key: &str, messages: &[HashMap<String, String>]) {
 // ── Agent execution (stub) ─────────────────────────────────────────────────
 
 /// Run the comment agent with the given prompt.
-///
-/// **STUB**: This function currently returns a placeholder response.
-/// Full integration with the Rust agent engine (hermes-agent-engine) is
-/// planned — it requires wiring the Feishu doc/drive toolsets into the
-/// agent runtime.
-pub async fn _run_comment_agent(prompt: &str, _session_key: &str) -> String {
-    info!(
-        "[Feishu-Comment] _run_comment_agent: prompt_len={} (STUB — returning placeholder)",
-        prompt.len()
-    );
-    // TODO: integrate with hermes-agent-engine once toolsets are available.
-    format!("[Auto-reply stub] Received comment, prompt length: {}", prompt.len())
+/// Run the comment agent with an optional MessageHandler.
+/// Falls back to a placeholder if no handler is available.
+async fn _run_comment_agent(
+    prompt: &str,
+    message_handler: Option<&dyn crate::runner::MessageHandler>,
+) -> String {
+    if let Some(handler) = message_handler {
+        match handler.run_with_prompt(prompt).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("[Feishu-Comment] Agent run_with_prompt failed: {e}");
+                format!(
+                    "[AI 助手处理出错: {e}]\n\n{}\n\n请稍后重试。",
+                    prompt.chars().take(200).collect::<String>()
+                )
+            }
+        }
+    } else {
+        info!("[Feishu-Comment] No MessageHandler available — returning placeholder");
+        format!(
+            "[AI 助手已收到文档评论请求，正在处理中...]\n\n{}\n\n请稍候，完整回复稍后送达。",
+            prompt.chars().take(200).collect::<String>()
+        )
+    }
 }
 
 // ── Event handler entry point ──────────────────────────────────────────────
@@ -1269,6 +1280,7 @@ pub async fn handle_drive_comment_event(
     token: &str,
     data: &Value,
     self_open_id: &str,
+    message_handler: Option<&dyn crate::runner::MessageHandler>,
 ) {
     info!("[Feishu-Comment] ========== handle_drive_comment_event START ==========");
     let parsed = match parse_drive_comment_event(data) {
@@ -1385,7 +1397,7 @@ pub async fn handle_drive_comment_event(
     let prompt = if is_whole {
         build_whole_prompt(client, token, file_token, file_type, doc_title, doc_url, self_open_id, from_open_id).await
     } else {
-        build_local_prompt(client, token, file_token, file_type, comment_id, doc_title, doc_url, self_open_id, from_open_id, reply_id).await
+        build_local_prompt(client, token, file_token, file_type, comment_id, doc_title, doc_url, self_open_id, from_open_id, reply_id, &comment_detail).await
     };
 
     info!(
@@ -1395,8 +1407,8 @@ pub async fn handle_drive_comment_event(
     debug!("[Feishu-Comment] Full prompt:\n{prompt}");
 
     // Step 4: Run agent
-    let sess_key = _session_key(file_type, file_token);
-    let response = _run_comment_agent(&prompt, &sess_key).await;
+    let _sess_key = _session_key(file_type, file_token);
+    let response = _run_comment_agent(&prompt, message_handler).await;
 
     if response.is_empty() || response.contains(NO_REPLY_SENTINEL) {
         info!("[Feishu-Comment] Agent returned NO_REPLY, skipping delivery");
@@ -1474,7 +1486,7 @@ async fn build_whole_prompt(
             let is_self = !self_open_id.is_empty() && uid == self_open_id;
             let idx = timeline.len();
             timeline.push((uid.clone(), text.clone(), is_self));
-            if &uid == from_open_id {
+            if uid == from_open_id {
                 current_text = _extract_semantic_text(r, self_open_id);
                 current_index = idx;
             }
@@ -1543,6 +1555,7 @@ async fn build_local_prompt(
     self_open_id: &str,
     from_open_id: &str,
     expect_reply_id: &str,
+    comment_detail: &Value,
 ) -> String {
     info!("[Feishu-Comment] Fetching comment thread replies...");
     let replies = list_comment_replies(
@@ -1555,7 +1568,8 @@ async fn build_local_prompt(
     )
     .await;
 
-    let quote_text = String::new(); // TODO: extract from comment_detail if needed
+    // Extract quoted content from the comment detail (the document text the user highlighted).
+    let quote_text = _extract_reply_text(comment_detail);
 
     let mut timeline: Vec<(String, String, bool)> = Vec::new();
     let mut root_text = String::new();
@@ -1565,7 +1579,7 @@ async fn build_local_prompt(
     for (i, r) in replies.iter().enumerate() {
         let uid = _get_reply_user_id(r);
         let text = _extract_reply_text(r);
-        let is_self = !self_open_id.is_empty() && &uid == self_open_id;
+        let is_self = !self_open_id.is_empty() && uid == self_open_id;
         timeline.push((uid.clone(), text.clone(), is_self));
         if i == 0 {
             root_text = _extract_semantic_text(r, self_open_id);

@@ -293,7 +293,7 @@ impl EmailAdapter {
 
     /// Send a plain-text reply.
     pub async fn send_text(&self, chat_id: &str, text: &str) -> Result<String, String> {
-        self.send_email(chat_id, text, None, None).await
+        self.send_email(chat_id, text, None, None, None).await
     }
 
     /// Send a file as an attachment.
@@ -304,8 +304,42 @@ impl EmailAdapter {
         file_name: Option<&str>,
         caption: Option<&str>,
     ) -> Result<String, String> {
-        self.send_email(chat_id, caption.unwrap_or(""), Some(file_path), file_name)
+        self.send_email(chat_id, caption.unwrap_or(""), Some(file_path), file_name, None)
             .await
+    }
+
+    /// Send a file from an in-memory byte slice.
+    pub async fn send_document_bytes(
+        &self,
+        chat_id: &str,
+        data: &[u8],
+        file_name: &str,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        self.send_email(chat_id, caption.unwrap_or(""), None, Some(file_name), Some(data.to_vec()))
+            .await
+    }
+
+    /// Send an image file as an attachment.
+    pub async fn send_image(
+        &self,
+        chat_id: &str,
+        file_path: &str,
+        file_name: Option<&str>,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        self.send_document(chat_id, file_path, file_name, caption).await
+    }
+
+    /// Send an image from an in-memory byte slice.
+    pub async fn send_image_bytes(
+        &self,
+        chat_id: &str,
+        data: &[u8],
+        file_name: &str,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        self.send_document_bytes(chat_id, data, file_name, caption).await
     }
 
     // -----------------------------------------------------------------
@@ -318,6 +352,7 @@ impl EmailAdapter {
         body: &str,
         attachment_path: Option<&str>,
         attachment_name: Option<&str>,
+        attachment_bytes: Option<Vec<u8>>,
     ) -> Result<String, String> {
         let config = self.config.clone();
         let to_addr = to_addr.to_string();
@@ -333,6 +368,7 @@ impl EmailAdapter {
                 &body,
                 attachment_path.as_deref(),
                 attachment_name.as_deref(),
+                attachment_bytes,
                 ctx.as_ref(),
             )
         })
@@ -562,6 +598,7 @@ fn send_email_blocking(
     body: &str,
     attachment_path: Option<&str>,
     attachment_name: Option<&str>,
+    attachment_bytes: Option<Vec<u8>>,
     ctx: Option<&ThreadContext>,
 ) -> Result<String, String> {
     let from_mb: Mailbox = config
@@ -605,12 +642,18 @@ fn send_email_blocking(
     builder = builder.message_id(Some(msg_id.clone()));
 
     // Build body / attachments.
-    let email = if let Some(path) = attachment_path {
-        let data = std::fs::read(path)
-            .map_err(|e| format!("Failed to read attachment {path}: {e}"))?;
+    let email = if attachment_bytes.is_some() || attachment_path.is_some() {
+        let data = if let Some(bytes) = attachment_bytes {
+            bytes
+        } else if let Some(path) = attachment_path {
+            std::fs::read(path)
+                .map_err(|e| format!("Failed to read attachment {path}: {e}"))?
+        } else {
+            vec![]
+        };
         let filename = attachment_name
             .map(|s| s.to_string())
-            .or_else(|| Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()))
+            .or_else(|| attachment_path.and_then(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().to_string())))
             .unwrap_or_else(|| "attachment".to_string());
         let ct = guess_mime_type(&filename);
 
@@ -622,7 +665,9 @@ fn send_email_blocking(
                 .map_err(|e| format!("Failed to build email: {e}"))?
         } else {
             let plain = SinglePart::builder()
-                .header(ContentType::parse("text/plain").unwrap())
+                .header(ContentType::parse("text/plain").unwrap_or_else(|_| {
+                    ContentType::parse("text/plain").expect("static mime is valid")
+                }))
                 .body(body.to_string());
             builder
                 .multipart(
@@ -634,7 +679,9 @@ fn send_email_blocking(
         }
     } else {
         builder
-            .header(ContentType::parse("text/plain").unwrap())
+            .header(ContentType::parse("text/plain").unwrap_or_else(|_| {
+                    ContentType::parse("text/plain").expect("static mime is valid")
+                }))
             .body(body.to_string())
             .map_err(|e| format!("Failed to build email: {e}"))?
     };
@@ -769,19 +816,26 @@ fn extract_text_body(parsed: &ParsedMail) -> String {
 }
 
 fn strip_html(html: &str) -> String {
-    fn re(pattern: &str) -> Regex {
-        Regex::new(pattern).expect("valid regex")
-    }
+    static BR_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static P_OPEN_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static P_CLOSE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static TAG_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static MULTI_NL_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let br_re = BR_RE.get_or_init(|| Regex::new(r"(?i)<br\s*/?>").unwrap());
+    let p_open_re = P_OPEN_RE.get_or_init(|| Regex::new(r"(?i)<p[^>]*>").unwrap());
+    let p_close_re = P_CLOSE_RE.get_or_init(|| Regex::new(r"(?i)</p>").unwrap());
+    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
+    let multi_nl_re = MULTI_NL_RE.get_or_init(|| Regex::new(r"\n{3,}").unwrap());
     let mut text = html.to_string();
-    text = re(r"(?i)<br\s*/?>").replace_all(&text, "\n").into_owned();
-    text = re(r"(?i)<p[^>]*>").replace_all(&text, "\n").into_owned();
-    text = re(r"(?i)</p>").replace_all(&text, "\n").into_owned();
-    text = re(r"<[^>]+>").replace_all(&text, "").into_owned();
+    text = br_re.replace_all(&text, "\n").into_owned();
+    text = p_open_re.replace_all(&text, "\n").into_owned();
+    text = p_close_re.replace_all(&text, "\n").into_owned();
+    text = tag_re.replace_all(&text, "").into_owned();
     text = text.replace("&nbsp;", " ");
     text = text.replace("&amp;", "&");
     text = text.replace("&lt;", "<");
     text = text.replace("&gt;", ">");
-    text = re(r"\n{3,}").replace_all(&text, "\n\n").into_owned();
+    text = multi_nl_re.replace_all(&text, "\n\n").into_owned();
     text.trim().to_string()
 }
 
@@ -910,14 +964,164 @@ fn guess_mime_type(filename: &str) -> ContentType {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    match ext.as_str() {
-        "txt" => ContentType::parse("text/plain").unwrap(),
-        "html" | "htm" => ContentType::parse("text/html").unwrap(),
-        "pdf" => ContentType::parse("application/pdf").unwrap(),
-        "jpg" | "jpeg" => ContentType::parse("image/jpeg").unwrap(),
-        "png" => ContentType::parse("image/png").unwrap(),
-        "gif" => ContentType::parse("image/gif").unwrap(),
-        "webp" => ContentType::parse("image/webp").unwrap(),
-        _ => ContentType::parse("application/octet-stream").unwrap(),
+    let mime = match ext.as_str() {
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    };
+    ContentType::parse(mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let config = EmailConfig::default();
+        assert!(config.address.is_empty());
+        assert!(config.password.is_empty());
+        assert_eq!(config.imap_port, 993);
+        assert_eq!(config.smtp_port, 587);
+        assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert!(!config.skip_attachments);
+        assert!(config.allowed_users.is_empty());
+    }
+
+    #[test]
+    fn test_config_is_configured() {
+        let mut config = EmailConfig::default();
+        assert!(!config.is_configured());
+        config.address = "test@example.com".to_string();
+        assert!(!config.is_configured());
+        config.password = "pass".to_string();
+        assert!(!config.is_configured());
+        config.imap_host = "imap.example.com".to_string();
+        assert!(!config.is_configured());
+        config.smtp_host = "smtp.example.com".to_string();
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn test_extract_email_address() {
+        assert_eq!(
+            extract_email_address("John Doe <john@example.com>"),
+            "john@example.com"
+        );
+        assert_eq!(
+            extract_email_address("<alice@domain.org>"),
+            "alice@domain.org"
+        );
+        assert_eq!(
+            extract_email_address("bare@address.com"),
+            "bare@address.com"
+        );
+        assert_eq!(extract_email_address(""), "");
+    }
+
+    #[test]
+    fn test_extract_sender_name() {
+        assert_eq!(
+            extract_sender_name("\"John Doe\" <john@example.com>"),
+            "John Doe"
+        );
+        assert_eq!(
+            extract_sender_name("Jane Smith <jane@example.com>"),
+            "Jane Smith"
+        );
+        assert_eq!(
+            extract_sender_name("<bare@example.com>"),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_is_automated_sender() {
+        let mut headers = HashMap::new();
+        assert!(is_automated_sender("noreply@example.com", &headers));
+        assert!(is_automated_sender("no-reply@company.com", &headers));
+        assert!(is_automated_sender("mailer-daemon@bounce.host", &headers));
+        assert!(!is_automated_sender("user@example.com", &headers));
+
+        headers.insert("auto-submitted".to_string(), "yes".to_string());
+        assert!(is_automated_sender("user@example.com", &headers));
+
+        headers.remove("auto-submitted");
+        headers.insert("auto-submitted".to_string(), "no".to_string());
+        assert!(!is_automated_sender("user@example.com", &headers));
+
+        headers.remove("auto-submitted");
+        headers.insert("precedence".to_string(), "bulk".to_string());
+        assert!(is_automated_sender("news@list.com", &headers));
+
+        headers.remove("precedence");
+        headers.insert("list-unsubscribe".to_string(), "<https://x.com>".to_string());
+        assert!(is_automated_sender("news@list.com", &headers));
+    }
+
+    #[test]
+    fn test_strip_html() {
+        assert_eq!(
+            strip_html("<p>Hello</p><br/><b>World</b>"),
+            "Hello\n\nWorld"
+        );
+        assert_eq!(
+            strip_html("A &amp; B &lt; C &gt; D &nbsp; E"),
+            "A & B < C > D   E"
+        );
+        assert_eq!(
+            strip_html("<a href='x'>link</a>"),
+            "link"
+        );
+    }
+
+    #[test]
+    fn test_extract_text_body() {
+        let raw = "From: test@test.com\r\n\
+                   Content-Type: text/plain\r\n\r\nHello world";
+        let parsed = parse_mail(raw.as_bytes()).unwrap();
+        assert_eq!(extract_text_body(&parsed), "Hello world");
+    }
+
+    #[test]
+    fn test_extract_text_body_html_fallback() {
+        let raw = "From: test@test.com\r\n\
+                   Content-Type: text/html\r\n\r\n<p>Hello</p>";
+        let parsed = parse_mail(raw.as_bytes()).unwrap();
+        let body = extract_text_body(&parsed);
+        assert!(body.contains("Hello"));
+    }
+
+    #[test]
+    fn test_guess_mime_type() {
+        let ct = guess_mime_type("report.pdf");
+        assert!(format!("{ct:?}").contains("pdf"));
+        let ct = guess_mime_type("image.png");
+        assert!(format!("{ct:?}").contains("png"));
+        let ct = guess_mime_type("unknown.xyz");
+        assert!(format!("{ct:?}").contains("octet-stream"));
+        let ct = guess_mime_type("noext");
+        assert!(format!("{ct:?}").contains("octet-stream"));
+    }
+
+    #[test]
+    fn test_trim_seen_uids() {
+        let mut seen: HashSet<u32> = (0..3000).collect();
+        trim_seen_uids(&mut seen);
+        assert!(seen.len() <= SEEN_UIDS_MAX);
+    }
+
+    #[test]
+    fn test_adapter_new_and_disconnect() {
+        let config = EmailConfig::default();
+        let adapter = EmailAdapter::new(config);
+        assert!(!adapter.is_connected());
+        adapter.disconnect();
+        assert!(!adapter.is_connected());
     }
 }

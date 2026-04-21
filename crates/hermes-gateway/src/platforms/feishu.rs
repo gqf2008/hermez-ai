@@ -45,7 +45,7 @@ const MAX_TEXT_INJECT_BYTES: u64 = 1024 * 1024;
 /// Regex for markdown special chars (mirrors Python `_MARKDOWN_SPECIAL_CHARS_RE`).
 static MARKDOWN_SPECIAL_CHARS_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"([][_*()~`>#+\-.!{}|])").unwrap()
+        regex::Regex::new(r"([\[\]_*()~`>#+\-.!{}|])").unwrap()
     });
 
 /// Regex for markdown links.
@@ -459,8 +459,9 @@ fn escape_markdown_text(text: &str) -> String {
 
 /// Wrap inline code with appropriate backtick fence.
 fn wrap_inline_code(text: &str) -> String {
-    let max_run = regex::Regex::new(r"`+")
-        .unwrap()
+    static BACKTICK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let backtick_re = BACKTICK_RE.get_or_init(|| regex::Regex::new(r"`+").unwrap());
+    let max_run = backtick_re
         .find_iter(text)
         .map(|m| m.len())
         .max()
@@ -525,8 +526,7 @@ fn render_code_block_element(element: &Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
-        .replace('\n', " ")
-        .replace('\r', " ");
+        .replace(['\n', '\r'], " ");
     let code = element
         .get("text")
         .or_else(|| element.get("content"))
@@ -718,7 +718,7 @@ fn render_nested_post(value: &Value, result: &mut FeishuPostParseResult) -> Stri
             }
             value
                 .as_object()
-                .unwrap()
+                .unwrap_or(&serde_json::Map::new())
                 .values()
                 .map(|v| render_nested_post(v, result))
                 .filter(|s| !s.is_empty())
@@ -771,14 +771,15 @@ fn resolve_locale_payload(payload: &Value) -> Option<&Value> {
 /// Parse a Feishu post payload into markdown-like text.
 /// Mirrors Python `parse_feishu_post_payload`.
 pub fn parse_feishu_post_payload(payload: &Value) -> FeishuPostParseResult {
-    let resolved = resolve_post_payload(payload);
-    if resolved.is_none() {
-        return FeishuPostParseResult {
-            text_content: FALLBACK_POST_TEXT.to_string(),
-            ..Default::default()
-        };
-    }
-    let resolved = resolved.unwrap();
+    let resolved = match resolve_post_payload(payload) {
+        Some(r) => r,
+        None => {
+            return FeishuPostParseResult {
+                text_content: FALLBACK_POST_TEXT.to_string(),
+                ..Default::default()
+            }
+        }
+    };
     let mut result = FeishuPostParseResult::default();
     let mut parts: Vec<String> = Vec::new();
 
@@ -888,7 +889,7 @@ fn collect_forward_entries(payload: &Value) -> Vec<String> {
             } else {
                 obj.get("content")
                     .and_then(|v| v.as_str())
-                    .map(|s| normalize_feishu_text(s))
+                    .map(normalize_feishu_text)
                     .unwrap_or_default()
             };
             if !body.is_empty() {
@@ -947,7 +948,7 @@ fn normalize_interactive_message(message_type: &str, payload: &Value) -> FeishuN
     let card_payload = payload
         .get("card")
         .and_then(|v| v.as_object())
-        .map(|_| payload.get("card").unwrap())
+        .map(|_| payload.get("card").unwrap_or(payload))
         .unwrap_or(payload);
 
     let title = find_header_title(card_payload)
@@ -1296,10 +1297,19 @@ pub struct FeishuAdapter {
     approval_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Dedup for card actions (token → expiry Instant).
     card_action_dedup: Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Optional message handler for platform-specific flows (e.g. drive comment replies).
+    pub message_handler: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
+    /// Gateway-level approval registry for resolving pending approvals.
+    approval_registry: crate::runner::ApprovalRegistry,
 }
 
 impl FeishuAdapter {
-    pub fn new(config: FeishuConfig) -> Self {
+    /// Access the adapter configuration.
+    pub fn config(&self) -> &FeishuConfig {
+        &self.config
+    }
+
+    pub fn new(config: FeishuConfig, approval_registry: crate::runner::ApprovalRegistry) -> Self {
         let dedup_cache_size = std::env::var("HERMES_FEISHU_DEDUP_CACHE_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1323,6 +1333,8 @@ impl FeishuAdapter {
             approval_state: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             approval_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             card_action_dedup: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            message_handler: Arc::new(tokio::sync::Mutex::new(None)),
+            approval_registry,
             config,
         }
     }
@@ -1553,9 +1565,10 @@ impl FeishuAdapter {
             "Feishu button resolved approval for session {} (choice={choice}, user={user_name})",
             state.session_key,
         );
-        // TODO: call into gateway approval system to unblock agent
-        // In Python: tools.approval.resolve_gateway_approval(state["session_key"], choice)
-        let _ = (state, choice, user_name);
+        let resolved = self.approval_registry.resolve(&state.session_key, choice);
+        if !resolved {
+            warn!("[Feishu] No pending approval found for session {}", state.session_key);
+        }
     }
 
     /// Upload an image to Feishu and return the image_key.
@@ -2266,8 +2279,10 @@ impl FeishuAdapter {
                     Ok(token) => {
                         let client = &self.client;
                         let self_open_id = &self.config.bot_open_id;
+                        let handler_guard = self.message_handler.lock().await;
+                        let handler_opt = handler_guard.as_ref().map(|arc| arc.as_ref() as &dyn crate::runner::MessageHandler);
                         crate::platforms::feishu_comment::handle_drive_comment_event(
-                            client, &token, &event, self_open_id,
+                            client, &token, &event, self_open_id, handler_opt,
                         ).await;
                     }
                     Err(e) => {
@@ -2456,6 +2471,8 @@ impl FeishuAdapter {
             approval_state: self.approval_state.clone(),
             approval_counter: self.approval_counter.clone(),
             card_action_dedup: self.card_action_dedup.clone(),
+            message_handler: self.message_handler.clone(),
+            approval_registry: self.approval_registry.clone(),
         }
     }
 
@@ -2886,7 +2903,7 @@ mod tests {
     #[test]
     fn test_not_configured_when_empty() {
         let config = FeishuConfig::from_env();
-        let adapter = FeishuAdapter::new(config);
+        let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
         assert!(!adapter.is_configured());
     }
 
@@ -2896,7 +2913,7 @@ mod tests {
             group_policy: GroupPolicy::Open,
             ..FeishuConfig::from_env()
         };
-        let adapter = FeishuAdapter::new(config);
+        let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
         assert!(adapter.is_group_message_allowed("any_user", "chat1"));
     }
 
@@ -2909,7 +2926,7 @@ mod tests {
             allowed_users: allowed,
             ..FeishuConfig::from_env()
         };
-        let adapter = FeishuAdapter::new(config);
+        let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
         assert!(adapter.is_group_message_allowed("user1", "chat1"));
         assert!(!adapter.is_group_message_allowed("user2", "chat1"));
     }
@@ -2920,7 +2937,7 @@ mod tests {
             group_policy: GroupPolicy::Disabled,
             ..FeishuConfig::from_env()
         };
-        let adapter = FeishuAdapter::new(config);
+        let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
         assert!(!adapter.is_group_message_allowed("any_user", "chat1"));
     }
 
@@ -2932,7 +2949,7 @@ mod tests {
             encrypt_key: "test_encrypt_key".to_string(),
             ..FeishuConfig::from_env()
         };
-        let adapter = FeishuAdapter::new(config);
+        let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
 
         let body = b"test body";
         let timestamp = "1234567890";

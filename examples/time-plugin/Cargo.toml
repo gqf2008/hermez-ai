@@ -1,0 +1,18 @@
+[package]
+name = "hermes-time-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wit-bindgen-rt = { version = "0.39", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "hermez:plugin"
+
+[package.metadata.component.target]
+dependencies = {}
+
+[workspace]

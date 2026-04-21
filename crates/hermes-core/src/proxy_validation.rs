@@ -62,7 +62,7 @@ fn looks_like_valid_url(value: &str) -> bool {
     }
     // If there's a port (host:port), the port part should be purely numeric
     // until the first `/` or `?`. Catches `http://127.0.0.1:6153export`.
-    let host_part = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host_part = after_scheme.split(&['/', '?'][..]).next().unwrap_or(after_scheme);
     if let Some(colon_idx) = host_part.rfind(':') {
         let port_and_auth = &host_part[colon_idx + 1..];
         // Strip userinfo if present (user:pass@host)
@@ -72,8 +72,8 @@ fn looks_like_valid_url(value: &str) -> bool {
         } else {
             port_and_auth
         };
-        // Port must be all digits (empty port like `http://host:` is invalid)
-        if !port_str.is_empty() && !port_str.chars().all(|c| c.is_ascii_digit()) {
+        // Port must be all digits and non-empty (empty port like `http://host:` is invalid)
+        if port_str.is_empty() || !port_str.chars().all(|c| c.is_ascii_digit()) {
             return false;
         }
     }
@@ -108,5 +108,37 @@ mod tests {
     fn test_validate_proxy_env_clean() {
         // No proxy vars set → clean
         assert!(validate_proxy_env_urls().is_ok());
+    }
+
+    #[test]
+    fn test_looks_like_valid_url_edge_cases() {
+        // Empty port
+        assert!(!looks_like_valid_url("http://host:"));
+        // Valid with path
+        assert!(looks_like_valid_url("https://api.example.com/v1/chat"));
+        // Valid with query
+        assert!(looks_like_valid_url("http://localhost:8080?debug=1"));
+        // Missing scheme
+        assert!(!looks_like_valid_url("//localhost:8080"));
+        // FTP is not supported
+        assert!(!looks_like_valid_url("ftp://files.example.com"));
+    }
+
+    #[test]
+    fn test_validate_base_url_empty() {
+        assert!(validate_base_url("").is_ok());
+    }
+
+    #[test]
+    fn test_looks_like_valid_url_userinfo() {
+        // user:pass@host should be accepted (complex URL)
+        assert!(looks_like_valid_url("http://user:pass@proxy.example.com:3128"));
+    }
+
+    #[test]
+    fn test_looks_like_valid_url_socks_schemes() {
+        assert!(looks_like_valid_url("socks5://localhost:1080"));
+        assert!(looks_like_valid_url("socks5h://localhost:1080"));
+        assert!(looks_like_valid_url("socks://localhost:1080"));
     }
 }

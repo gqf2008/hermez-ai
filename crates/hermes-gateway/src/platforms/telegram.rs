@@ -273,7 +273,7 @@ impl TelegramAdapter {
                     if desc_lower.contains("thread not found") && thread_id.is_some() {
                         tracing::warn!(
                             "Thread {} not found, retrying without message_thread_id",
-                            thread_id.unwrap()
+                            thread_id.unwrap_or_default()
                         );
                         *thread_id = None;
                         continue;
@@ -1144,10 +1144,13 @@ impl TelegramAdapter {
 
 // ── Webhook internals ───────────────────────────────────────────────────────
 
+/// Type alias for the webhook message callback.
+type TelegramMessageCallback =
+    Arc<tokio::sync::Mutex<Option<Arc<dyn Fn(TelegramMessageEvent) + Send + Sync>>>>;
+
 struct TelegramWebhookState {
     adapter: Arc<TelegramAdapter>,
-    on_message:
-        Arc<tokio::sync::Mutex<Option<Arc<dyn Fn(TelegramMessageEvent) + Send + Sync>>>>,
+    on_message: TelegramMessageCallback,
 }
 
 async fn handle_telegram_webhook(

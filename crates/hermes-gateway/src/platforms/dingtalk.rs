@@ -56,18 +56,15 @@ const STREAM_PING_INTERVAL_SECS: u64 = 60;
 
 /// How the Dingtalk adapter receives inbound messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum DingtalkConnectionMode {
     /// Passive webhook HTTP server.
     Webhook,
     /// Active WebSocket stream connection.
+    #[default]
     Stream,
 }
 
-impl Default for DingtalkConnectionMode {
-    fn default() -> Self {
-        DingtalkConnectionMode::Stream
-    }
-}
 
 // ── Platform Configuration ─────────────────────────────────────────────────
 
@@ -144,7 +141,7 @@ impl DingtalkConfig {
         if let Some(v) = extra.get("require_mention") {
             cfg.require_mention = match v {
                 serde_json::Value::Bool(b) => *b,
-                serde_json::Value::Number(n) => n.as_i64().map_or(false, |v| v != 0),
+                serde_json::Value::Number(n) => n.as_i64().is_some_and(|v| v != 0),
                 serde_json::Value::String(s) => {
                     matches!(s.to_lowercase().trim(), "true" | "1" | "yes" | "on")
                 }
@@ -623,9 +620,9 @@ impl DingtalkAdapter {
         }
 
         // Cache session webhook
-        if !chat_id.is_empty() && !session_webhook.is_empty() {
-            if session_webhook.starts_with("https://api.dingtalk.com/")
-                || session_webhook.starts_with("https://oapi.dingtalk.com/")
+        if !chat_id.is_empty() && !session_webhook.is_empty()
+            && (session_webhook.starts_with("https://api.dingtalk.com/")
+                || session_webhook.starts_with("https://oapi.dingtalk.com/"))
             {
                 self.webhook_cache.insert(
                     chat_id.clone(),
@@ -633,7 +630,6 @@ impl DingtalkAdapter {
                     session_webhook_expired_time,
                 );
             }
-        }
 
         if !msg_id.is_empty() {
             self.dedup.insert(msg_id.to_string());
@@ -1289,14 +1285,12 @@ impl DingtalkAdapter {
         }
 
         for handle in handles {
-            if let Ok((pointer, maybe_url)) = handle.await {
-                if let Some(url) = maybe_url {
-                    if let Some(parent) = pointer.rfind('/') {
-                        let parent_ptr = &pointer[..parent];
-                        if let Some(parent_val) = payload.pointer_mut(parent_ptr) {
-                            if let Some(obj) = parent_val.as_object_mut() {
-                                obj.insert("downloadUrl".to_string(), serde_json::json!(url));
-                            }
+            if let Ok((pointer, Some(url))) = handle.await {
+                if let Some(parent) = pointer.rfind('/') {
+                    let parent_ptr = &pointer[..parent];
+                    if let Some(parent_val) = payload.pointer_mut(parent_ptr) {
+                        if let Some(obj) = parent_val.as_object_mut() {
+                            obj.insert("downloadUrl".to_string(), serde_json::json!(url));
                         }
                     }
                 }
@@ -1337,13 +1331,15 @@ impl DingtalkAdapter {
 
     /// Normalize markdown for DingTalk's parser.
     fn normalize_markdown(&self, text: &str) -> String {
+        static NUMBERED_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let numbered_re = NUMBERED_RE.get_or_init(|| regex::Regex::new(r"^\d+\.\s").unwrap());
         let lines: Vec<&str> = text.split('\n').collect();
         let mut out: Vec<String> = Vec::new();
         for (i, line) in lines.iter().enumerate() {
-            let is_numbered = regex::Regex::new(r"^\d+\.\s").unwrap().is_match(line.trim());
+            let is_numbered = numbered_re.is_match(line.trim());
             if is_numbered && i > 0 {
                 let prev = lines[i - 1];
-                if !prev.trim().is_empty() && !regex::Regex::new(r"^\d+\.\s").unwrap().is_match(prev.trim()) {
+                if !prev.trim().is_empty() && !numbered_re.is_match(prev.trim()) {
                     out.push("".to_string());
                 }
             }
@@ -1608,7 +1604,7 @@ impl DingtalkAdapter {
                         let adapter = self.clone();
                         let msg_id = event.message_id.clone();
                         let conv_id = event.chat_id.clone();
-                        let _ = tokio::spawn(async move {
+                        let _handle = tokio::spawn(async move {
                             let _ = adapter
                                 .send_emotion(&msg_id, &conv_id, "🤔Thinking", false)
                                 .await;

@@ -71,8 +71,8 @@ fn is_word_char(c: char) -> bool {
 
 /// Check whether the match at `[start, end)` in `text` has word boundaries on both sides.
 fn has_word_boundaries(text: &str, start: usize, end: usize) -> bool {
-    let left_ok = start == 0 || text[..start].chars().next_back().map_or(true, |c| !is_word_char(c));
-    let right_ok = end >= text.len() || text[end..].chars().next().map_or(true, |c| !is_word_char(c));
+    let left_ok = start == 0 || text[..start].chars().next_back().is_none_or(|c| !is_word_char(c));
+    let right_ok = end >= text.len() || text[end..].chars().next().is_none_or(|c| !is_word_char(c));
     left_ok && right_ok
 }
 
@@ -461,7 +461,7 @@ Your goal is to preserve ALL important information while reducing length. Never 
     let effective_model = model
         .map(|s| s.to_string())
         .or_else(|| std::env::var("AUXILIARY_WEB_EXTRACT_MODEL").ok().filter(|s| !s.is_empty()))
-        .or_else(|| hermes_llm::auxiliary_client::get_default_aux_model("openrouter").map(String::from))
+        .or_else(|| hermes_llm::auxiliary_client::get_default_aux_model("openrouter"))
         .unwrap_or_else(|| "google/gemini-3-flash-preview".to_string());
 
     let request = hermes_llm::auxiliary_client::AuxiliaryRequest {
@@ -584,7 +584,7 @@ async fn process_large_content_chunked(
     let effective_model = model
         .map(|s| s.to_string())
         .or_else(|| std::env::var("AUXILIARY_WEB_EXTRACT_MODEL").ok().filter(|s| !s.is_empty()))
-        .or_else(|| hermes_llm::auxiliary_client::get_default_aux_model("openrouter").map(String::from))
+        .or_else(|| hermes_llm::auxiliary_client::get_default_aux_model("openrouter"))
         .unwrap_or_else(|| "google/gemini-3-flash-preview".to_string());
 
     let request = hermes_llm::auxiliary_client::AuxiliaryRequest {

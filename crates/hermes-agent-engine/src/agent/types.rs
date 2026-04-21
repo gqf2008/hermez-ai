@@ -213,3 +213,15 @@ pub struct TurnUsage {
     pub completion_tokens: u64,
     pub total_tokens: u64,
 }
+
+/// Handler for interactive approval requests from tools (e.g., terminal).
+///
+/// When a tool returns `status: "approval_required"`, the agent loop
+/// pauses and calls this handler to wait for user confirmation.
+#[async_trait::async_trait]
+pub trait ApprovalHandler: Send + Sync {
+    /// Request approval for a command. Blocks until the user responds.
+    ///
+    /// Returns `"approve"`, `"approve_session"`, `"approve_always"`, or `"deny"`.
+    async fn request_approval(&self, command: &str, description: &str) -> Result<String, String>;
+}

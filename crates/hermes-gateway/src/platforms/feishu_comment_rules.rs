@@ -9,7 +9,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use tracing::warn;
 
@@ -95,8 +94,10 @@ impl MtimeCache {
         };
 
         let mtime = meta.modified().ok();
-        if self.mtime == mtime && self.data.is_some() {
-            return self.data.clone().unwrap();
+        if self.mtime == mtime {
+            if let Some(ref data) = self.data {
+                return data.clone();
+            }
         }
 
         let content = match std::fs::read_to_string(&self.path) {
@@ -130,14 +131,14 @@ impl MtimeCache {
     }
 }
 
-fn rules_cache() -> &'static Mutex<MtimeCache> {
-    static CACHE: std::sync::OnceLock<Mutex<MtimeCache>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(MtimeCache::new(rules_file())))
+fn rules_cache() -> &'static parking_lot::Mutex<MtimeCache> {
+    static CACHE: std::sync::OnceLock<parking_lot::Mutex<MtimeCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(MtimeCache::new(rules_file())))
 }
 
-fn pairing_cache() -> &'static Mutex<MtimeCache> {
-    static CACHE: std::sync::OnceLock<Mutex<MtimeCache>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(MtimeCache::new(pairing_file())))
+fn pairing_cache() -> &'static parking_lot::Mutex<MtimeCache> {
+    static CACHE: std::sync::OnceLock<parking_lot::Mutex<MtimeCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(MtimeCache::new(pairing_file())))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ fn parse_document_rule(raw: &serde_json::Value) -> CommentDocumentRule {
 
 /// Load comment rules from disk (mtime-cached).
 pub fn load_config() -> CommentsConfig {
-    let raw = rules_cache().lock().unwrap().load();
+    let raw = rules_cache().lock().load();
     if raw.is_empty() {
         return CommentsConfig::default();
     }
@@ -292,7 +293,7 @@ pub fn resolve_rule(
     };
 
     let best_src = {
-        let priority = |s: &str| match s.split(':').next().unwrap() {
+        let priority = |s: &str| match s.split(':').next().unwrap_or("") {
             "exact" => 0,
             "wildcard" => 1,
             "top" => 2,
@@ -319,7 +320,7 @@ pub fn resolve_rule(
 // ---------------------------------------------------------------------------
 
 fn load_pairing_approved() -> HashSet<String> {
-    let data = pairing_cache().lock().unwrap().load();
+    let data = pairing_cache().lock().load();
     let approved = data.get("approved");
     match approved {
         Some(serde_json::Value::Object(m)) => m.keys().cloned().collect(),
@@ -342,7 +343,8 @@ fn save_pairing(data: serde_json::Map<String, serde_json::Value>) {
         if std::fs::write(&tmp, bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
             // Invalidate cache
-            if let Ok(mut cache) = pairing_cache().lock() {
+            {
+                let mut cache = pairing_cache().lock();
                 cache.mtime = None;
                 cache.data = None;
             }
@@ -352,7 +354,7 @@ fn save_pairing(data: serde_json::Map<String, serde_json::Value>) {
 
 /// Add a user to the pairing-approved list. Returns true if newly added.
 pub fn pairing_add(user_open_id: &str) -> bool {
-    let mut data = pairing_cache().lock().unwrap().load();
+    let mut data = pairing_cache().lock().load();
     let mut approved = match data.get("approved") {
         Some(serde_json::Value::Object(m)) => m.clone(),
         _ => serde_json::Map::new(),
@@ -378,7 +380,7 @@ pub fn pairing_add(user_open_id: &str) -> bool {
 
 /// Remove a user from the pairing-approved list. Returns true if removed.
 pub fn pairing_remove(user_open_id: &str) -> bool {
-    let mut data = pairing_cache().lock().unwrap().load();
+    let mut data = pairing_cache().lock().load();
     let mut approved = match data.get("approved") {
         Some(serde_json::Value::Object(m)) => m.clone(),
         _ => return false,
@@ -394,7 +396,7 @@ pub fn pairing_remove(user_open_id: &str) -> bool {
 
 /// Return the approved dict {user_open_id: {approved_at: ...}}.
 pub fn pairing_list() -> HashMap<String, serde_json::Value> {
-    let data = pairing_cache().lock().unwrap().load();
+    let data = pairing_cache().lock().load();
     match data.get("approved") {
         Some(serde_json::Value::Object(m)) => {
             m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()

@@ -1,0 +1,16 @@
+name: time-plugin
+version: 0.1.0
+description: Time utilities — current time, formatting, diffs, timezone conversion
+author: Hermes Team
+component_entry: plugin.component.wasm
+provides_hooks:
+  - on_session_start
+  - on_session_end
+provides_tools:
+  - time_now
+  - time_format
+  - time_diff
+  - time_add
+  - timezone_convert
+  - time_parse
+manifest_version: 1

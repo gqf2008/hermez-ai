@@ -432,7 +432,7 @@ impl MattermostAdapter {
         }
 
         // Ignore system posts
-        if post.get("type").and_then(|v| v.as_str()).map_or(false, |t| !t.is_empty()) {
+        if post.get("type").and_then(|v| v.as_str()).is_some_and(|t| !t.is_empty()) {
             return Ok(());
         }
 
@@ -482,12 +482,11 @@ impl MattermostAdapter {
 
         // User authorization
         let sender_id = post.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if !self.config.allow_all_users && !self.config.allowed_users.is_empty() {
-            if !self.config.allowed_users.iter().any(|u| u == &sender_id) {
+        if !self.config.allow_all_users && !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.iter().any(|u| u == &sender_id) {
                 warn!("Mattermost: unauthorized user {sender_id}");
                 return Ok(());
             }
-        }
 
         let sender_name = data.get("sender_name").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches('@').to_string();
         let root_id = post.get("root_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
@@ -656,9 +655,19 @@ impl MattermostAdapter {
     ) -> Result<(), String> {
         let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
         let file_data = tokio::fs::read(file_path).await.map_err(|e| format!("read file failed: {e}"))?;
+        self.send_file_bytes(channel_id, &file_data, file_name, caption, reply_to).await
+    }
 
-        let file_id = self.upload_file(channel_id, &file_data, file_name).await?;
-
+    /// Send a file from an in-memory byte slice.
+    pub async fn send_file_bytes(
+        &self,
+        channel_id: &str,
+        data: &[u8],
+        file_name: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let file_id = self.upload_file(channel_id, data, file_name).await?;
         let mut payload = serde_json::json!({
             "channel_id": channel_id,
             "message": caption.unwrap_or(""),
@@ -667,9 +676,44 @@ impl MattermostAdapter {
         if let Some(root) = reply_to {
             payload["root_id"] = Value::String(root.to_string());
         }
-
         self.api_post("posts", &payload).await?;
         Ok(())
+    }
+
+    /// Send an image from a URL (downloads and uploads).
+    pub async fn send_image(
+        &self,
+        channel_id: &str,
+        image_url: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let bytes = self
+            .client
+            .get(image_url)
+            .send()
+            .await
+            .map_err(|e| format!("download image failed: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("read image bytes failed: {e}"))?;
+        let filename = image_url
+            .split('/')
+            .next_back()
+            .unwrap_or("image.png");
+        self.send_file_bytes(channel_id, &bytes, filename, caption, reply_to).await
+    }
+
+    /// Send an image from an in-memory byte slice.
+    pub async fn send_image_bytes(
+        &self,
+        channel_id: &str,
+        data: &[u8],
+        file_name: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        self.send_file_bytes(channel_id, data, file_name, caption, reply_to).await
     }
 
     async fn upload_file(&self, channel_id: &str, file_data: &[u8], filename: &str) -> Result<String, String> {
@@ -706,7 +750,11 @@ impl MattermostAdapter {
 
     fn format_message(&self, content: &str) -> String {
         // Convert ![alt](url) to just the URL — Mattermost renders image URLs as inline previews
-        let re = regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap_or_else(|_| regex::Regex::new("").unwrap());
+        static IMAGE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = IMAGE_RE.get_or_init(|| {
+            regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)")
+                .unwrap_or_else(|_| regex::Regex::new("").unwrap())
+        });
         re.replace_all(content, "${2}").to_string()
     }
 

@@ -43,7 +43,7 @@ skip() { echo -e "  ${YELLOW}SKIP${NC}  $1 — $2"; SKIPPED=$((SKIPPED + 1)); }
 # Build
 #────────────────────────────────────────────
 log "Building hermes $BUILD_FLAG ..."
-cargo build $BUILD_FLAG --quiet 2>&1
+cargo build $BUILD_FLAG --quiet --workspace 2>&1
 log "Binary: $BIN"
 [[ -f "$BIN" ]] || { echo "Binary not found at $BIN"; exit 1; }
 

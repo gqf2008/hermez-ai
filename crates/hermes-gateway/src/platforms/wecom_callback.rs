@@ -214,7 +214,7 @@ impl WecomCallbackAdapter {
             "msgtype": "text",
             "agentid": agent_id,
             "text": {
-                "content": &text[..text.len().min(MAX_MESSAGE_LENGTH)],
+                "content": text.chars().take(MAX_MESSAGE_LENGTH).collect::<String>(),
             },
             "safe": 0,
         });
@@ -392,7 +392,7 @@ impl CallbackState {
             "msgtype": "text",
             "agentid": agent_id,
             "text": {
-                "content": &text[..text.len().min(MAX_MESSAGE_LENGTH)],
+                "content": text.chars().take(MAX_MESSAGE_LENGTH).collect::<String>(),
             },
             "safe": 0,
         });
@@ -924,7 +924,7 @@ impl WeComCrypto {
 }
 
 fn sha1_signature(token: &str, timestamp: &str, nonce: &str, encrypt: &str) -> String {
-    let mut parts = vec![token, timestamp, nonce, encrypt];
+    let mut parts = [token, timestamp, nonce, encrypt];
     parts.sort_unstable();
     let data = parts.join("");
     use sha1::Digest;

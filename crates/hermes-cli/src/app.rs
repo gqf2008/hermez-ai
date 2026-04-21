@@ -8,7 +8,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use hermes_agent_engine::agent::{AIAgent, AgentConfig};
+use hermes_agent_engine::agent::{AIAgent, AgentConfig, ApprovalHandler};
 use hermes_agent_engine::agent::types::Message;
 use hermes_core::{HermesConfig, Result};
 use hermes_tools::registry::ToolRegistry;
@@ -832,7 +832,7 @@ impl HermesApp {
     pub fn run_gateway(&self) -> Result<()> {
         use console::Style;
         use hermes_gateway::runner::{GatewayRunner, load_gateway_config, GatewayConfig};
-        use hermes_gateway::config::Platform;
+        // Platform type is used via fully-qualified names in AgentApprovalHandler.
 
         let green = Style::new().green();
         let cyan = Style::new().cyan();
@@ -902,15 +902,82 @@ impl HermesApp {
         println!("  Gateway running (Ctrl+C to stop)");
 
         // Create agent-based message handler
+        #[derive(Clone)]
+        struct AgentApprovalHandler {
+            registry: hermes_gateway::runner::ApprovalRegistry,
+            platform: hermes_gateway::config::Platform,
+            chat_id: String,
+            slack_adapter: Option<Arc<hermes_gateway::platforms::slack::SlackAdapter>>,
+            feishu_adapter: Option<Arc<hermes_gateway::platforms::feishu::FeishuAdapter>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalHandler for AgentApprovalHandler {
+            async fn request_approval(&self, command: &str, description: &str) -> std::result::Result<String, String> {
+                let session_key = match self.platform {
+                    hermes_gateway::config::Platform::Slack => {
+                        if let Some(ref adapter) = self.slack_adapter {
+                            format!("{}:{}", adapter.config().bot_token, self.chat_id)
+                        } else {
+                            return std::result::Result::Err("Slack adapter not available".to_string());
+                        }
+                    }
+                    hermes_gateway::config::Platform::Feishu => {
+                        if let Some(ref adapter) = self.feishu_adapter {
+                            format!("{}:{}", adapter.config().app_id, self.chat_id)
+                        } else {
+                            return std::result::Result::Err("Feishu adapter not available".to_string());
+                        }
+                    }
+                    _ => {
+                        return std::result::Result::Err(format!("Approval not supported for platform {:?}", self.platform));
+                    }
+                };
+
+                // Register BEFORE sending the approval card so that when the
+                // user clicks the button the resolver can find the receiver.
+                let rx = self.registry.register(&session_key);
+
+                // Send the interactive approval card.
+                match self.platform {
+                    hermes_gateway::config::Platform::Slack => {
+                        if let Some(ref adapter) = self.slack_adapter {
+                            let _ = adapter
+                                .send_exec_approval(&self.chat_id, command, &session_key, description, None)
+                                .await;
+                        }
+                    }
+                    hermes_gateway::config::Platform::Feishu => {
+                        if let Some(ref adapter) = self.feishu_adapter {
+                            let _ = adapter
+                                .send_exec_approval(&self.chat_id, command, &session_key, description)
+                                .await;
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Block until the user interacts with the card (or times out).
+                match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+                    Ok(Ok(choice)) => Ok(choice),
+                    Ok(Err(_)) => std::result::Result::Err("Approval channel closed".to_string()),
+                    Err(_) => std::result::Result::Err("Approval timed out (5 minutes)".to_string()),
+                }
+            }
+        }
+
         struct AgentHandler {
             agent: tokio::sync::Mutex<AIAgent>,
+            registry: hermes_gateway::runner::ApprovalRegistry,
+            slack_adapter: Option<Arc<hermes_gateway::platforms::slack::SlackAdapter>>,
+            feishu_adapter: Option<Arc<hermes_gateway::platforms::feishu::FeishuAdapter>>,
         }
 
         #[async_trait::async_trait]
         impl hermes_gateway::runner::MessageHandler for AgentHandler {
             async fn handle_message(
                 &self,
-                _platform: Platform,
+                platform: hermes_gateway::config::Platform,
                 chat_id: &str,
                 content: &str,
                 model_override: Option<&str>,
@@ -921,6 +988,18 @@ impl HermesApp {
                 if let Some(model) = model_override {
                     agent.switch_model(model, None, None, None);
                 }
+
+                // Wire up the per-turn approval handler so that dangerous
+                // terminal commands can block for user confirmation.
+                let approval_handler = AgentApprovalHandler {
+                    registry: self.registry.clone(),
+                    platform,
+                    chat_id: chat_id.to_string(),
+                    slack_adapter: self.slack_adapter.clone(),
+                    feishu_adapter: self.feishu_adapter.clone(),
+                };
+                agent.set_approval_handler(Some(Arc::new(approval_handler)));
+
                 let turn_result = agent.run_conversation(content, None, None).await;
                 if turn_result.response.is_empty() {
                     Err("Agent returned no response".to_string())
@@ -949,11 +1028,24 @@ impl HermesApp {
                     tracing::debug!("Agent handler locked during interrupt — flag already set");
                 }
             }
+
+            async fn run_with_prompt(&self, prompt: &str) -> std::result::Result<String, String> {
+                let mut agent = self.agent.lock().await;
+                let turn_result = agent.run_conversation(prompt, None, None).await;
+                if turn_result.response.is_empty() {
+                    Err("Agent returned no response".to_string())
+                } else {
+                    Ok(turn_result.response.clone())
+                }
+            }
         }
 
         rt.block_on(async {
             let handler = std::sync::Arc::new(AgentHandler {
                 agent: tokio::sync::Mutex::new(agent),
+                registry: runner.approval_registry(),
+                slack_adapter: runner.slack_adapter(),
+                feishu_adapter: runner.feishu_adapter(),
             });
             runner.set_message_handler(handler).await;
             runner.run().await

@@ -72,3 +72,74 @@ pub fn daily_reset_cutoff(reset_hour: u32) -> DateTime<Local> {
         today_reset
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Local, NaiveDate, TimeZone};
+
+    #[test]
+    fn test_now_and_utc() {
+        let local = now();
+        let utc = now_utc();
+        // They should represent the same instant (within a few seconds)
+        let diff = (utc - local.with_timezone(&chrono::Utc)).num_seconds().abs();
+        assert!(diff < 5, "local and utc differ by {diff}s");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        let dt = Local.with_ymd_and_hms(2024, 6, 15, 14, 30, 0).unwrap();
+        assert_eq!(format_timestamp(&dt), "2024-06-15 14:30:00");
+    }
+
+    #[test]
+    fn test_format_log_timestamp() {
+        let dt = Local.with_ymd_and_hms(2024, 6, 15, 14, 30, 0).unwrap();
+        assert_eq!(format_log_timestamp(&dt), "20240615");
+    }
+
+    #[test]
+    fn test_parse_timestamp_valid() {
+        let dt = parse_timestamp("2024-06-15T14:30:00Z").unwrap();
+        let utc_dt = dt.with_timezone(&chrono::Utc);
+        assert_eq!(utc_dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-06-15 14:30:00");
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid() {
+        assert!(parse_timestamp("not-a-timestamp").is_none());
+    }
+
+    #[test]
+    fn test_duration_secs() {
+        let start = Local.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
+        let end = Local.with_ymd_and_hms(2024, 1, 1, 12, 0, 5).unwrap();
+        assert_eq!(duration_secs(&start, &end), 5.0);
+    }
+
+    #[test]
+    fn test_is_today() {
+        assert!(is_today(&now()));
+        let yesterday = now() - Duration::days(1);
+        assert!(!is_today(&yesterday));
+    }
+
+    #[test]
+    fn test_is_within_minutes() {
+        assert!(is_within_minutes(&now(), 5));
+        let old = now() - Duration::minutes(10);
+        assert!(!is_within_minutes(&old, 5));
+    }
+
+    #[test]
+    fn test_daily_reset_cutoff_before_reset() {
+        // If now is before today's reset hour, cutoff should be yesterday's reset
+        let now_time = Local.with_ymd_and_hms(2024, 6, 15, 3, 0, 0).unwrap();
+        // We can't easily mock `now()` here, but we can verify the function doesn't panic
+        // and returns a reasonable value when called at runtime
+        let cutoff = daily_reset_cutoff(4);
+        // Just verify it returns a DateTime
+        let _ = format_timestamp(&cutoff);
+    }
+}

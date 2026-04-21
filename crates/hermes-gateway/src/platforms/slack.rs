@@ -52,6 +52,9 @@ use tokio_tungstenite::connect_async;
 
 use crate::dedup::MessageDeduplicator;
 
+/// Type alias for assistant thread metadata storage.
+type AssistantThreads = Arc<Mutex<HashMap<(String, String), HashMap<String, String>>>>;
+
 /// Slack Web API base URL.
 const API_BASE: &str = "https://slack.com/api";
 /// Max message length for a single Slack message.
@@ -236,7 +239,7 @@ pub struct SlackAdapter {
     /// Bot user ID (fetched lazily).
     bot_user_id: Arc<Mutex<Option<String>>>,
     /// User name cache.
-    user_name_cache: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    user_name_cache: Arc<parking_lot::Mutex<HashMap<String, String>>>,
     /// team_id → bot_token mapping for multi-workspace.
     team_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// team_id → bot_user_id.
@@ -248,7 +251,7 @@ pub struct SlackAdapter {
     /// Threads where the bot was @mentioned.
     mentioned_threads: Arc<Mutex<HashSet<String>>>,
     /// Assistant thread metadata: (channel_id, thread_ts) → metadata map.
-    assistant_threads: Arc<Mutex<HashMap<(String, String), HashMap<String, String>>>>,
+    assistant_threads: AssistantThreads,
     /// Pending approval resolved flags: message_ts → resolved.
     approval_resolved: Arc<Mutex<HashMap<String, bool>>>,
     /// Pending approval state keyed by approval_id.
@@ -257,10 +260,17 @@ pub struct SlackAdapter {
     approval_counter: Arc<AtomicU64>,
     /// Running flag for Socket Mode graceful shutdown.
     running: Arc<AtomicBool>,
+    /// Gateway-level approval registry for resolving pending approvals.
+    approval_registry: crate::runner::ApprovalRegistry,
 }
 
 impl SlackAdapter {
-    pub fn new(config: SlackConfig) -> Self {
+    /// Access the adapter configuration.
+    pub fn config(&self) -> &SlackConfig {
+        &self.config
+    }
+
+    pub fn new(config: SlackConfig, approval_registry: crate::runner::ApprovalRegistry) -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -271,7 +281,7 @@ impl SlackAdapter {
                 }),
             dedup: Arc::new(MessageDeduplicator::with_params(300, 2000)),
             bot_user_id: Arc::new(Mutex::new(None)),
-            user_name_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            user_name_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             team_tokens: Arc::new(Mutex::new(HashMap::new())),
             team_bot_user_ids: Arc::new(Mutex::new(HashMap::new())),
             channel_team: Arc::new(Mutex::new(HashMap::new())),
@@ -282,6 +292,7 @@ impl SlackAdapter {
             approval_state: Arc::new(Mutex::new(HashMap::new())),
             approval_counter: Arc::new(AtomicU64::new(1)),
             running: Arc::new(AtomicBool::new(true)),
+            approval_registry,
             config,
         }
     }
@@ -591,13 +602,11 @@ impl SlackAdapter {
                 result = read_half.next() => {
                     match result {
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(e) = self.handle_socket_mode_message(
+                            self.handle_socket_mode_message(
                                 &text,
                                 &on_message,
                                 &mut write_half,
-                            ).await {
-                                return Err(e);
-                            }
+                            ).await?
                         }
                         Some(Ok(Message::Close(frame))) => {
                             info!("[Slack SM] Closed by server: {frame:?}");
@@ -609,13 +618,11 @@ impl SlackAdapter {
                         Some(Ok(Message::Pong(_))) => {}
                         Some(Ok(Message::Binary(bin))) => {
                             if let Ok(text) = String::from_utf8(bin.into()) {
-                                if let Err(e) = self.handle_socket_mode_message(
+                                self.handle_socket_mode_message(
                                     &text,
                                     &on_message,
                                     &mut write_half,
-                                ).await {
-                                    return Err(e);
-                                }
+                                ).await?
                             }
                         }
                         Some(Ok(Message::Frame(_))) => {}
@@ -672,7 +679,7 @@ impl SlackAdapter {
                     "[Slack SM] Socket Mode ready ({} connection(s))",
                     num_connections
                 );
-                return Ok(());
+                Ok(())
             }
             "events_api" => {
                 if let Some(payload) = envelope.get("payload") {
@@ -686,7 +693,7 @@ impl SlackAdapter {
                     }
                 }
                 self.ack_socket_mode(write_half, envelope_id).await;
-                return Ok(());
+                Ok(())
             }
             "interactive" => {
                 if let Some(payload) = envelope.get("payload") {
@@ -695,7 +702,7 @@ impl SlackAdapter {
                     }
                 }
                 self.ack_socket_mode(write_half, envelope_id).await;
-                return Ok(());
+                Ok(())
             }
             "slash_command" => {
                 if let Some(payload) = envelope.get("payload") {
@@ -704,7 +711,7 @@ impl SlackAdapter {
                     }
                 }
                 self.ack_socket_mode(write_half, envelope_id).await;
-                return Ok(());
+                Ok(())
             }
             "disconnect" => {
                 let reason = envelope
@@ -716,12 +723,12 @@ impl SlackAdapter {
                     let _ = write_half.send(Message::Close(None)).await;
                     return Err(format!("refresh_url:{refresh_url}"));
                 }
-                return Err(format!("Server requested disconnect: {reason}"));
+                Err(format!("Server requested disconnect: {reason}"))
             }
             _ => {
                 debug!("[Slack SM] Unknown envelope type: {msg_type}");
                 self.ack_socket_mode(write_half, envelope_id).await;
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -1145,7 +1152,7 @@ impl SlackAdapter {
 
     async fn resolve_user_name(&self, user_id: &str) -> Option<String> {
         {
-            let cache = self.user_name_cache.lock().unwrap();
+            let cache = self.user_name_cache.lock();
             if let Some(name) = cache.get(user_id) {
                 return Some(name.clone());
             }
@@ -1176,7 +1183,6 @@ impl SlackAdapter {
 
         self.user_name_cache
             .lock()
-            .unwrap()
             .insert(user_id.to_string(), name.clone());
         Some(name)
     }
@@ -1676,8 +1682,10 @@ impl SlackAdapter {
             "Slack button resolved approval for session {} (choice={choice}, user={user_name})",
             state.session_key
         );
-        let _ = (state, choice, user_name);
-        // TODO: wire into gateway-level approval blocking mechanism.
+        let resolved = self.approval_registry.resolve(&state.session_key, choice);
+        if !resolved {
+            warn!("[Slack] No pending approval found for session {}", state.session_key);
+        }
     }
 
     // ── Clone helper for webhooks ─────────────────────────────────────────
@@ -1700,6 +1708,7 @@ impl SlackAdapter {
             approval_state: self.approval_state.clone(),
             approval_counter: self.approval_counter.clone(),
             running: self.running.clone(),
+            approval_registry: self.approval_registry.clone(),
         }
     }
 }

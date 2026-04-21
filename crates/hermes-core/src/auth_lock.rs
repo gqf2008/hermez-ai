@@ -64,3 +64,38 @@ pub fn with_auth_json_write_lock<T>(
     drop(lock_file); // unlock on drop
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auth_lock_path() {
+        let path = auth_lock_path();
+        assert!(path.file_name().unwrap() == "auth.lock");
+    }
+
+    #[test]
+    fn test_with_auth_json_read_lock() {
+        let result = with_auth_json_read_lock(|| 42).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_with_auth_json_write_lock() {
+        let result = with_auth_json_write_lock(|| "locked").unwrap();
+        assert_eq!(result, "locked");
+    }
+
+    #[test]
+    fn test_read_write_lock_compatibility() {
+        // Multiple read locks should be compatible
+        let r1 = with_auth_json_read_lock(|| 1).unwrap();
+        let r2 = with_auth_json_read_lock(|| 2).unwrap();
+        assert_eq!(r1 + r2, 3);
+
+        // Write lock after read locks should work ( sequential in same thread)
+        let w1 = with_auth_json_write_lock(|| 10).unwrap();
+        assert_eq!(w1, 10);
+    }
+}

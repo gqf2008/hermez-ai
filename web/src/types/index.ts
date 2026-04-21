@@ -40,3 +40,17 @@ export interface CronJob {
   last_run?: string;
   next_run?: string;
 }
+
+export interface SessionDetail {
+  session: Session | null;
+  messages: Array<{
+    role: string;
+    content?: string;
+    tool_call_id?: string;
+    tool_calls?: string;
+    tool_name?: string;
+    reasoning?: string;
+    reasoning_details?: string;
+    codex_reasoning_items?: string;
+  }>;
+}

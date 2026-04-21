@@ -1,0 +1,11 @@
+name: calc-plugin
+version: 0.1.0
+description: Mathematical expression calculator for Hermes
+author: Hermes Team
+component_entry: plugin.component.wasm
+provides_hooks:
+  - on_session_start
+  - on_session_end
+provides_tools:
+  - calc
+manifest_version: 1

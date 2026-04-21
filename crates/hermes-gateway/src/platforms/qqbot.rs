@@ -439,7 +439,7 @@ impl QqbotAdapter {
 
         if let Some(seq) = s {
             let mut last_seq = self.last_seq.lock().await;
-            if last_seq.is_none() || seq > last_seq.unwrap() {
+            if last_seq.is_none() || seq > last_seq.unwrap_or(0) {
                 *last_seq = Some(seq);
             }
         }
@@ -726,7 +726,10 @@ impl QqbotAdapter {
     }
 
     fn strip_at_mention(&self, content: &str) -> String {
-        let re = regex::Regex::new(r"^@\S+\s*").unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+        static AT_MENTION_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = AT_MENTION_RE.get_or_init(|| {
+            regex::Regex::new(r"^@\S+\s*").unwrap_or_else(|_| regex::Regex::new("").unwrap())
+        });
         re.replace(content.trim(), "").to_string()
     }
 
@@ -967,7 +970,7 @@ impl QqbotAdapter {
             let token = self.access_token.lock().await;
             let expires = self.token_expires_at.lock().await;
             if token.is_some() && now < *expires - Duration::from_secs(60) {
-                return Ok(token.clone().unwrap());
+                return Ok(token.clone().unwrap_or_default());
             }
         }
 
@@ -1034,9 +1037,11 @@ impl QqbotAdapter {
         let token = self.ensure_token().await?;
         let url = format!("{API_BASE}{path}");
 
+        let http_method = reqwest::Method::from_bytes(method.as_bytes())
+            .unwrap_or(reqwest::Method::POST);
         let mut req = self
             .client
-            .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), &url)
+            .request(http_method, &url)
             .header("Authorization", format!("QQBot {token}"))
             .header("Content-Type", "application/json");
 

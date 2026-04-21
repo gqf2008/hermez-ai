@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import type { Session } from '../types';
 import { api, mockApi, safeApi } from '../api/client';
 
@@ -55,7 +56,7 @@ export default function Sessions() {
         <tbody>
           {filtered.map(s => (
             <tr key={s.id}>
-              <td>{s.title}</td>
+              <td><Link to={`/sessions/${s.id}`}>{s.title}</Link></td>
               <td><span className={`badge platform-${s.platform}`}>{s.platform}</span></td>
               <td>{s.model}</td>
               <td>{fmtTokens(s.input_tokens)}</td>

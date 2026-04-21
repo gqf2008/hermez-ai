@@ -22,6 +22,9 @@ use tracing::{debug, error, info, warn};
 use crate::dedup::MessageDeduplicator;
 use crate::platforms::helpers::ThreadParticipationTracker;
 
+/// Type alias for pending text batch state.
+type PendingBatches = Arc<Mutex<HashMap<String, (DiscordMessageEvent, Instant, tokio::task::AbortHandle)>>>;
+
 /// Discord API base URL.
 const API_BASE: &str = "https://discord.com/api/v10";
 /// Gateway version.
@@ -238,7 +241,7 @@ pub struct DiscordAdapter {
     /// Allowed mentions config.
     allowed_mentions: AllowedMentions,
     /// Pending text batches for rapid successive messages.
-    pending_batches: Arc<Mutex<HashMap<String, (DiscordMessageEvent, Instant, tokio::task::AbortHandle)>>>,
+    pending_batches: PendingBatches,
 }
 
 impl DiscordAdapter {
@@ -723,12 +726,11 @@ impl DiscordAdapter {
             .flatten()
             .collect();
 
-            if !self.config.allowed_channels.is_empty() {
-                if channel_ids.is_disjoint(&self.config.allowed_channels) {
+            if !self.config.allowed_channels.is_empty()
+                && channel_ids.is_disjoint(&self.config.allowed_channels) {
                     debug!("Discord: ignoring message in non-allowed channel {chat_id}");
                     return;
                 }
-            }
             if !self.config.ignored_channels.is_disjoint(&channel_ids) {
                 debug!("Discord: ignoring message in ignored channel {chat_id}");
                 return;
@@ -741,7 +743,7 @@ impl DiscordAdapter {
             let is_free = !self.config.free_response_channels.is_disjoint(&HashSet::from([chat_id.clone()]));
             if !in_bot_thread && !is_free {
                 // Check if bot is mentioned
-                let bot_mentioned = self.bot_user_id.lock().as_ref().map_or(false, |bot_id| {
+                let bot_mentioned = self.bot_user_id.lock().as_ref().is_some_and(|bot_id| {
                     content.contains(&format!("<@{bot_id}>"))
                         || content.contains(&format!("<@!{bot_id}>"))
                 });

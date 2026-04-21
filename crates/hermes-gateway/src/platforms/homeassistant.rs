@@ -135,14 +135,48 @@ impl HomeAssistantAdapter {
 
     /// Send a persistent notification via HA REST API.
     pub async fn send_notification(&self, content: &str) -> Result<String, String> {
+        self.send_notification_raw(content, None).await
+    }
+
+    /// Send an image notification (embeds the URL as Markdown; HA frontend
+    /// may render it as a clickable image link).
+    pub async fn send_image(&self, image_url: &str, caption: Option<&str>) -> Result<String, String> {
+        let mut msg = String::new();
+        if let Some(c) = caption {
+            msg.push_str(c);
+            msg.push('\n');
+        }
+        msg.push_str(&format!("![image]({})", image_url));
+        self.send_notification_raw(&msg, None).await
+    }
+
+    /// Send a document notification (embeds the URL as a Markdown link).
+    pub async fn send_document(&self, doc_url: &str, caption: Option<&str>) -> Result<String, String> {
+        let mut msg = String::new();
+        if let Some(c) = caption {
+            msg.push_str(c);
+            msg.push('\n');
+        }
+        msg.push_str(&format!("[document]({})", doc_url));
+        self.send_notification_raw(&msg, None).await
+    }
+
+    async fn send_notification_raw(
+        &self,
+        content: &str,
+        data: Option<serde_json::Value>,
+    ) -> Result<String, String> {
         let url = format!(
             "{}/api/services/persistent_notification/create",
             self.config.hass_url.trim_end_matches('/')
         );
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "title": "Hermes Agent",
-            "message": &content[..content.len().min(MAX_MESSAGE_LENGTH)],
+            "message": content.chars().take(MAX_MESSAGE_LENGTH).collect::<String>(),
         });
+        if let Some(d) = data {
+            payload["data"] = d;
+        }
 
         let resp = self
             .client
@@ -223,8 +257,8 @@ impl HomeAssistantAdapter {
         let ws_url = self
             .config
             .hass_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://")
+            .replacen("http://", "ws://", 1)
+            .replacen("https://", "wss://", 1)
             .trim_end_matches('/')
             .to_string();
         let ws_url = format!("{ws_url}/api/websocket");

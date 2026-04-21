@@ -164,7 +164,7 @@ impl EventBridge {
             .iter()
             .filter(|e| {
                 e.cursor > after_cursor
-                    && session_key.as_ref().map_or(true, |sk| &e.session_key == sk)
+                    && session_key.as_ref().is_none_or(|sk| &e.session_key == sk)
             })
             .take(limit)
             .map(|e| {
@@ -206,7 +206,7 @@ impl EventBridge {
                 let queue = self.queue.lock().await;
                 for e in queue.iter() {
                     if e.cursor > after_cursor
-                        && session_key.as_ref().map_or(true, |sk| &e.session_key == sk)
+                        && session_key.as_ref().is_none_or(|sk| &e.session_key == sk)
                     {
                         let mut obj = serde_json::json!({
                             "cursor": e.cursor,
@@ -992,7 +992,7 @@ pub async fn run_mcp_server(verbose: bool) -> Result<(), std::io::Error> {
     let service = rmcp::serve_server(server, rmcp::transport::stdio()).await?;
 
     // Wait for service to complete (stdio closes)
-    service.waiting().await.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    service.waiting().await.map_err(std::io::Error::other)?;
 
     Ok(())
 }

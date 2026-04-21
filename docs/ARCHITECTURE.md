@@ -354,7 +354,7 @@
 │                      hermes-gateway                              │
 │                                                                   │
 │  ┌───────────────────────────────────────────────────────────┐   │
-│  │                    Platform enum (19)                      │   │
+│  │                    Platform enum (20)                      │   │
 │  │                                                           │   │
 │  │  Local │ Telegram │ Discord │ Whatsapp │ Slack │ Signal   │   │
 │  │  Mattermost │ Matrix │ Homeassistant │ Email │ Sms        │   │
@@ -441,9 +441,91 @@
 | `_extract_reasoning` | `hermes-llm/reasoning.rs` | 4 formats |
 | `prompt builder` | `hermes-prompt/builder.rs` | + cache control |
 | `context_compressor.py` | `hermes-prompt/context_compressor.rs` | 4-stage |
-| `gateway/run.py` | `hermes-gateway/runner.rs` | 19 platforms |
+| `gateway/run.py` | `hermes-gateway/runner.rs` | 20 platforms |
 | `cron/jobs.py` | `hermes-cron/` | Aligned |
 | `acp_adapter/` | `hermes-acp/` | 13 methods |
+
+## 9. Web Dashboard API
+
+The web dashboard (`hermes-cli/src/web_server.rs`) serves a React SPA from `web/dist/` and provides REST/SSE endpoints for session management, real-time chat, and system administration.
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | System overview (sessions, tokens, cron, disk) |
+| GET | `/api/sessions` | List all sessions |
+| POST | `/api/sessions` | Create new session |
+| GET | `/api/sessions/:id` | Session detail + message history |
+| DELETE | `/api/sessions/:id` | Delete session |
+| POST | `/api/sessions/:id/rename` | Rename session |
+| POST | `/api/sessions/:id/chat` | Blocking chat (returns full response) |
+| POST | `/api/sessions/:id/chat-stream` | **SSE streaming chat** (delta → done) |
+| GET | `/api/config` | Read `~/.hermes/config.yaml` |
+| POST | `/api/config` | Write `~/.hermes/config.yaml` |
+| GET | `/api/cron` | List cron jobs |
+| GET | `/api/plugins` | Discover installed plugins |
+
+### Frontend Pages
+
+| Route | Page | Key Features |
+|-------|------|--------------|
+| `/` | Dashboard | Stats cards, recent sessions, "+ New Chat" |
+| `/sessions` | Sessions | Searchable table, platform/model badges |
+| `/sessions/:id` | Session Detail | Message history, **Markdown rendering**, inline chat, delete/rename |
+| `/status` | Status | System info, platform connectivity, cron jobs |
+| `/settings` | Settings | **Inline config editor** (string/number/boolean), save to YAML |
+| `/plugins` | Plugins | Plugin cards with tools/hooks/technology tags |
+
+### Streaming Architecture
+
+```
+Browser ──POST /chat-stream──► Axum SSE
+                                  │
+                                  ▼
+                         AIAgent::set_stream_callback()
+                                  │
+                                  ▼
+                         mpsc::channel ──► ReceiverStream
+                                  │
+                                  ▼
+                         text/event-stream (delta / done / error)
+```
+
+## 10. Plugin Architecture
+
+Hermes supports both **Phase-2 WASM ABI** (manual memory management) and **WebAssembly Component Model** (wit-bindgen, type-safe).
+
+### WIT Interface (`wit/world.wit`)
+
+```
+world hermez-plugin {
+    import host;      // log, get-config, invoke-tool
+    export plugin;    // register, on-session-start, on-session-end, handle-tool
+}
+```
+
+### Plugin Discovery
+
+1. `PluginManager::discover()` walks `~/.hermes/plugins/`
+2. Each directory with `plugin.yaml` → `PluginManifest`
+3. Manifest declares: tools, hooks, wasm/component entry points
+4. `auto_load()` registers tools into `ToolRegistry` and hooks into `HookRegistry`
+
+### Example Plugins
+
+| Plugin | Type | Tools | Description |
+|--------|------|-------|-------------|
+| `example-wasm-plugin` | Phase-2 WASM | `greet` | Minimal C-ABI demo |
+| `example-component-plugin` | Component Model | `greet` | wit-bindgen demo |
+| `calc-plugin` | Component Model | `calc` | Math expression evaluator (+ − × ÷ ^, sqrt/sin/cos/ln...) |
+
+### Build Toolchain
+
+```bash
+cd examples/calc-plugin
+cargo component build --release  # produces plugin.component.wasm
+```
 
 ## Key Statistics
 
@@ -455,7 +537,7 @@
 | Total modules | 70+ |
 | Tool implementations | 55+ |
 | Toolset definitions | 20+ |
-| Platform adapters | 19 (5 implemented) |
+| Platform adapters | 20 (20 implemented) |
 | Provider types | 11 |
 | LLM modules | 15 |
 | Engine submodules | 14 |
@@ -468,4 +550,8 @@
 | Auxiliary fallback tiers | 5 |
 | Reasoning extraction formats | 4 |
 | Context compression stages | 4 |
+| Web Dashboard pages | 6 |
+| Web API endpoints | 12 |
+| Plugin examples | 3 (2 demo + 1 utility) |
+| CI/CD workflows | 1 (GitHub Actions) |
 | Tool call provider parsers | 10 |
