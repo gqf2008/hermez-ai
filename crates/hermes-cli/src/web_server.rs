@@ -5,7 +5,7 @@
 
 use axum::{
     extract::Path,
-    http::{header, StatusCode},
+    http::{header, StatusCode, Uri},
     response::{IntoResponse, Response, Sse},
     routing::{delete, get, post},
     Json, Router,
@@ -32,8 +32,7 @@ pub async fn run_server(host: &str, port: u16) -> anyhow::Result<()> {
         .route("/api/config", post(api_config_save))
         .route("/api/plugins", get(api_plugins))
         .route("/api/cron", get(api_cron))
-        .nest_service("/assets", axum::routing::get(serve_asset_service))
-        .fallback(serve_index);
+        .fallback(serve_static);
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -436,12 +435,13 @@ async fn api_cron() -> Json<serde_json::Value> {
 // Static file serving
 // ---------------------------------------------------------------------------
 
-async fn serve_index() -> Response {
-    serve_file("index.html")
-}
-
-async fn serve_asset_service(Path(file): Path<String>) -> Response {
-    serve_file(&format!("assets/{file}"))
+async fn serve_static(uri: Uri) -> Response {
+    let path = uri.path();
+    if path.starts_with("/assets/") {
+        serve_file(path.trim_start_matches('/'))
+    } else {
+        serve_file("index.html")
+    }
 }
 
 fn serve_file(name: &str) -> Response {

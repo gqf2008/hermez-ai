@@ -963,7 +963,7 @@ async fn call_anthropic_stream(
     let (tx, rx) = futures::channel::mpsc::unbounded::<LlmStreamEvent>();
 
     tokio::spawn(async move {
-        let mut buffer = String::new();
+        let mut buffer = Vec::<u8>::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
         let mut stop_reason: Option<String> = None;
@@ -984,33 +984,29 @@ async fn call_anthropic_stream(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            buffer.extend_from_slice(&bytes);
 
             // Process complete SSE messages (blank-line delimited)
             loop {
-                let mut end = 0usize;
-                let mut found = false;
-                while end < buffer.len() {
-                    if end + 1 < buffer.len() && &buffer[end..end + 2] == "\n\n" {
-                        end += 2;
-                        found = true;
+                // Find "\n\n" or "\r\n\r\n" separator in the byte buffer.
+                let mut sep_pos: Option<(usize, usize)> = None;
+                for i in 0..buffer.len() {
+                    if buffer[i] == b'\n' && i + 1 < buffer.len() && buffer[i + 1] == b'\n' {
+                        sep_pos = Some((i, 2));
                         break;
                     }
-                    if end + 1 < buffer.len() && &buffer[end..end + 2] == "\r\n"
-                        && end + 3 < buffer.len() && &buffer[end + 2..end + 4] == "\r\n" {
-                            end += 4;
-                            found = true;
-                            break;
-                        }
-                    end += 1;
+                    if buffer[i] == b'\r' && i + 3 < buffer.len()
+                        && buffer[i + 1] == b'\n' && buffer[i + 2] == b'\r' && buffer[i + 3] == b'\n' {
+                        sep_pos = Some((i, 4));
+                        break;
+                    }
                 }
-
-                if !found {
-                    break;
-                }
-
-                let chunk = buffer[..end].to_string();
-                buffer = buffer[end..].to_string();
+                let (sep, sep_len) = match sep_pos {
+                    Some((s, l)) => (s, l),
+                    None => break,
+                };
+                let chunk = String::from_utf8_lossy(&buffer[..sep]).to_string();
+                buffer = buffer[sep + sep_len..].to_vec();
 
                 if chunk.trim().is_empty() {
                     continue;
@@ -1023,9 +1019,11 @@ async fn call_anthropic_stream(
                     if line.is_empty() {
                         continue;
                     }
-                    if let Some(rest) = line.strip_prefix("event: ") {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        let rest = rest.trim_start();
                         event_type = Some(rest.to_string());
-                    } else if let Some(rest) = line.strip_prefix("data: ") {
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        let rest = rest.trim_start();
                         data_str = Some(rest.to_string());
                     }
                 }
@@ -1044,7 +1042,9 @@ async fn call_anthropic_stream(
                     continue;
                 }
 
-                match data.get("type").and_then(Value::as_str) {
+                let data_type = data.get("type").and_then(Value::as_str);
+
+                match data_type {
                     Some("message_start") => {
                         if let Some(msg) = data.get("message") {
                             if let Some(u) = msg.get("usage") {
