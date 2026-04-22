@@ -32,7 +32,7 @@ pub async fn run_server(host: &str, port: u16) -> anyhow::Result<()> {
         .route("/api/config", post(api_config_save))
         .route("/api/plugins", get(api_plugins))
         .route("/api/cron", get(api_cron))
-        .route("/assets/{*file}", get(serve_asset))
+        .nest_service("/assets", axum::routing::get(serve_asset_service))
         .fallback(serve_index);
 
     let addr = format!("{host}:{port}");
@@ -48,29 +48,25 @@ pub async fn run_server(host: &str, port: u16) -> anyhow::Result<()> {
 
 async fn api_status() -> Json<serde_json::Value> {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
     let (sessions_total, sessions_today, tokens_total) =
-        if db_path.exists() {
-            match hermes_state::SessionDB::open(&db_path) {
-                Ok(db) => {
-                    let total = db.session_count(None).unwrap_or(0);
-                    let today = db.session_count(Some("today")).unwrap_or(0);
-                    let tok: u64 = db
-                        .list_sessions_rich(None, None, 1000, 0, false)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|s| {
-                            (s.session.input_tokens + s.session.output_tokens
-                                + s.session.cache_read_tokens + s.session.cache_write_tokens) as u64
-                        })
-                        .sum();
-                    (total, today, tok)
-                }
-                Err(_) => (0, 0, 0),
+        match hermes_state::SessionDB::open(&db_path) {
+            Ok(db) => {
+                let total = db.session_count(None).unwrap_or(0);
+                let today = db.session_count(Some("today")).unwrap_or(0);
+                let tok: u64 = db
+                    .list_sessions_rich(None, None, 1000, 0, false)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| {
+                        (s.session.input_tokens + s.session.output_tokens
+                            + s.session.cache_read_tokens + s.session.cache_write_tokens) as u64
+                    })
+                    .sum();
+                (total, today, tok)
             }
-        } else {
-            (0, 0, 0)
+            Err(_) => (0, 0, 0),
         };
 
     let (cron_jobs, cron_active) = read_cron_stats(&home);
@@ -98,11 +94,10 @@ async fn api_status() -> Json<serde_json::Value> {
 
 async fn api_sessions() -> Json<serde_json::Value> {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
-    let sessions = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
-            Ok(db) => db
+    let sessions = match hermes_state::SessionDB::open(&db_path) {
+        Ok(db) => db
                 .list_sessions_rich(None, None, 100, 0, false)
                 .unwrap_or_default()
                 .into_iter()
@@ -122,20 +117,16 @@ async fn api_sessions() -> Json<serde_json::Value> {
                 })
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+        };
 
     Json(serde_json::json!(sessions))
 }
 
 async fn api_session_detail(Path(id): Path<String>) -> Json<serde_json::Value> {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
-    let result = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
+    let result = match hermes_state::SessionDB::open(&db_path) {
             Ok(db) => {
                 let session = db.get_session(&id).unwrap_or_default();
                 let messages = db.get_messages_as_conversation(&id).unwrap_or_default();
@@ -145,52 +136,41 @@ async fn api_session_detail(Path(id): Path<String>) -> Json<serde_json::Value> {
                 })
             }
             Err(_) => serde_json::json!({"error": "db open failed"}),
-        }
-    } else {
-        serde_json::json!({"error": "db not found"})
-    };
+        };
 
     Json(result)
 }
 
 async fn api_session_delete(Path(id): Path<String>) -> Json<serde_json::Value> {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
-    let result = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
+    let result = match hermes_state::SessionDB::open(&db_path) {
             Ok(db) => match db.delete_session(&id) {
                 Ok(true) => serde_json::json!({"deleted": true}),
                 Ok(false) => serde_json::json!({"deleted": false, "error": "not found"}),
                 Err(e) => serde_json::json!({"deleted": false, "error": e.to_string()}),
             },
             Err(e) => serde_json::json!({"deleted": false, "error": e.to_string()}),
-        }
-    } else {
-        serde_json::json!({"deleted": false, "error": "db not found"})
-    };
+        };
 
     Json(result)
 }
 
 async fn api_session_rename(Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
     let new_title = body.get("title").and_then(|v| v.as_str()).unwrap_or("");
 
-    let result = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
+    let result = match hermes_state::SessionDB::open(&db_path) {
             Ok(db) => match db.rename_session(&id, new_title) {
                 Ok(true) => serde_json::json!({"renamed": true}),
                 Ok(false) => serde_json::json!({"renamed": false, "error": "not found"}),
                 Err(e) => serde_json::json!({"renamed": false, "error": e.to_string()}),
             },
             Err(e) => serde_json::json!({"renamed": false, "error": e.to_string()}),
-        }
-    } else {
-        serde_json::json!({"renamed": false, "error": "db not found"})
-    };
+        };
 
     Json(result)
 }
@@ -200,23 +180,19 @@ async fn api_session_create(Json(body): Json<serde_json::Value>) -> Json<serde_j
     let model = body.get("model").and_then(|v| v.as_str());
 
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
     let session_id = format!("sess-{}", uuid::Uuid::new_v4());
 
-    let result = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
-            Ok(db) => match db.create_session(&session_id, "web", model, None, None, None, None) {
-                Ok(_) => {
-                    let _ = db.set_session_title(&session_id, title);
-                    serde_json::json!({"id": session_id, "title": title})
-                }
-                Err(e) => serde_json::json!({"error": e.to_string()}),
-            },
+    let result = match hermes_state::SessionDB::open(&db_path) {
+        Ok(db) => match db.create_session(&session_id, "web", model, None, None, None, None) {
+            Ok(_) => {
+                let _ = db.set_session_title(&session_id, title);
+                serde_json::json!({"id": session_id, "title": title})
+            }
             Err(e) => serde_json::json!({"error": e.to_string()}),
-        }
-    } else {
-        serde_json::json!({"error": "db not found"})
+        },
+        Err(e) => serde_json::json!({"error": e.to_string()}),
     };
 
     Json(result)
@@ -255,19 +231,15 @@ async fn api_chat(
     let config = build_agent_config(&id);
 
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
-    let history: Vec<Arc<serde_json::Value>> = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
-            Ok(db) => db
-                .get_messages_as_conversation(&id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
+    let db_path = home.join("state.db");
+    let history: Vec<Arc<serde_json::Value>> = match hermes_state::SessionDB::open(&db_path) {
+        Ok(db) => db
+            .get_messages_as_conversation(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        Err(_) => Vec::new(),
     };
 
     let registry = Arc::new(hermes_tools::registry::ToolRegistry::new());
@@ -287,18 +259,14 @@ async fn api_chat(
 
 async fn api_session_export(Path(id): Path<String>) -> Response {
     let home = hermes_core::hermes_home::get_hermes_home();
-    let db_path = home.join("sessions.db");
+    let db_path = home.join("state.db");
 
-    let export = if db_path.exists() {
-        match hermes_state::SessionDB::open(&db_path) {
-            Ok(db) => match db.export_session(&id) {
-                Ok(Some(data)) => data,
-                _ => serde_json::json!({"error": "session not found"}),
-            },
-            Err(_) => serde_json::json!({"error": "db open failed"}),
-        }
-    } else {
-        serde_json::json!({"error": "db not found"})
+    let export = match hermes_state::SessionDB::open(&db_path) {
+        Ok(db) => match db.export_session(&id) {
+            Ok(Some(data)) => data,
+            _ => serde_json::json!({"error": "session not found"}),
+        },
+        Err(_) => serde_json::json!({"error": "db open failed"}),
     };
 
     let body = serde_json::to_string_pretty(&export).unwrap_or_default();
@@ -329,7 +297,7 @@ async fn api_chat_stream(
         let config = build_agent_config(&id);
 
         let home = hermes_core::hermes_home::get_hermes_home();
-        let db_path = home.join("sessions.db");
+        let db_path = home.join("state.db");
         let history: Vec<Arc<serde_json::Value>> = if db_path.exists() {
             match hermes_state::SessionDB::open(&db_path) {
                 Ok(db) => db
@@ -472,7 +440,7 @@ async fn serve_index() -> Response {
     serve_file("index.html")
 }
 
-async fn serve_asset(Path(file): Path<String>) -> Response {
+async fn serve_asset_service(Path(file): Path<String>) -> Response {
     serve_file(&format!("assets/{file}"))
 }
 
