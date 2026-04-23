@@ -1544,95 +1544,41 @@ impl GatewayRunner {
         Ok(())
     }
 
+    /// Send shutdown signal to every channel in the vector.
+    fn trigger_shutdown(senders: &mut Vec<oneshot::Sender<()>>) {
+        for tx in std::mem::take(senders) {
+            let _ = tx.send(());
+        }
+    }
+
     /// Stop the gateway gracefully.
     pub fn stop(&mut self) {
-        // Trigger API server graceful shutdown
-        let senders = std::mem::take(&mut self.api_server_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Dingtalk webhook graceful shutdown
-        let senders = std::mem::take(&mut self.dingtalk_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Disconnect Dingtalk stream adapter
+        Self::trigger_shutdown(&mut self.api_server_shutdown_tx);
+        Self::trigger_shutdown(&mut self.dingtalk_shutdown_tx);
         if let Some(adapter) = self.dingtalk_adapter.take() {
-            tokio::spawn(async move {
-                adapter.disconnect().await;
-            });
+            tokio::spawn(async move { adapter.disconnect().await; });
         }
-        // Trigger Feishu webhook graceful shutdown
-        let senders = std::mem::take(&mut self.feishu_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Telegram graceful shutdown
-        let senders = std::mem::take(&mut self.telegram_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Discord graceful shutdown
-        let senders = std::mem::take(&mut self.discord_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Slack graceful shutdown
-        let senders = std::mem::take(&mut self.slack_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger WhatsApp graceful shutdown
-        let senders = std::mem::take(&mut self.whatsapp_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Disconnect WhatsApp adapter
+        Self::trigger_shutdown(&mut self.feishu_shutdown_tx);
+        Self::trigger_shutdown(&mut self.telegram_shutdown_tx);
+        Self::trigger_shutdown(&mut self.discord_shutdown_tx);
+        Self::trigger_shutdown(&mut self.slack_shutdown_tx);
+        Self::trigger_shutdown(&mut self.whatsapp_shutdown_tx);
         if let Some(adapter) = self.whatsapp_adapter.take() {
-            tokio::spawn(async move {
-                adapter.disconnect().await;
-            });
+            tokio::spawn(async move { adapter.disconnect().await; });
         }
-        // Trigger Webhook graceful shutdown
-        let senders = std::mem::take(&mut self.webhook_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger SMS graceful shutdown
-        let senders = std::mem::take(&mut self.sms_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Email graceful shutdown
-        let senders = std::mem::take(&mut self.email_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Disconnect Email adapter
+        Self::trigger_shutdown(&mut self.webhook_shutdown_tx);
+        Self::trigger_shutdown(&mut self.sms_shutdown_tx);
+        Self::trigger_shutdown(&mut self.email_shutdown_tx);
         if let Some(adapter) = self.email_adapter.take() {
             adapter.disconnect();
         }
-        // Trigger BlueBubbles graceful shutdown
-        let senders = std::mem::take(&mut self.bluebubbles_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger WeCom callback graceful shutdown
-        let senders = std::mem::take(&mut self.wecom_callback_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger Home Assistant graceful shutdown
-        let senders = std::mem::take(&mut self.homeassistant_shutdown_tx);
-        for tx in senders {
-            let _ = tx.send(());
-        }
-        // Trigger health check server graceful shutdown
+        Self::trigger_shutdown(&mut self.bluebubbles_shutdown_tx);
+        Self::trigger_shutdown(&mut self.wecom_callback_shutdown_tx);
+        Self::trigger_shutdown(&mut self.homeassistant_shutdown_tx);
         if let Some(tx) = self.health_check_shutdown_tx.take() {
             let _ = tx.send(());
         }
         self.running.store(false, Ordering::SeqCst);
-        // Clear tracking state so it doesn't leak across stop/restart cycles.
         self.running_sessions.lock().clear();
         self.busy_ack_ts.lock().clear();
         info!("Gateway stop requested");
