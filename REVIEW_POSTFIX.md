@@ -1,4 +1,4 @@
-# Post-Fix Review Report — hermes-rs
+# Post-Fix Review Report — hermez-rs
 
 > Review date: 2026-04-18  
 > All fixes from REVIEW.md have been applied and verified.
@@ -80,7 +80,7 @@
 | Singularity `docker://` → SIF | `resolve_image()` passes through raw URL | `singularity.rs:411` |
 | MCP OAuth | Config structs only, zero flow implementation | `mcp_oauth.rs` |
 | API server SSE streaming for tool calls | Commented TODO at line 1313 | `api_server.rs` |
-| ACP crate `handle_prompt` | Hardcoded placeholder | `hermes-acp/src/lib.rs:852` |
+| ACP crate `handle_prompt` | Hardcoded placeholder | `hermez-acp/src/lib.rs:852` |
 | Cost analytics | Always `$0.00` | `insights.rs` |
 | Voice TUI recording | Empty bytes placeholder | `voice_tui.rs` |
 | Claw migration | No-op stub | `claw_cmd.rs` |
@@ -88,7 +88,7 @@
 
 ### 🟡 Minor code quality notes
 
-1. **`hermes-acp/src/lib.rs` test unwraps** — Lines 1388–1470 are all inside `#[cfg(test)]`. Acceptable for tests.
+1. **`hermez-acp/src/lib.rs` test unwraps** — Lines 1388–1470 are all inside `#[cfg(test)]`. Acceptable for tests.
 
 2. **`mcp_client/server.rs` `#[allow(clippy::await_holding_lock)]`** — Uses `parking_lot::Mutex` (not `std::sync::Mutex`) held across `block_on`. `parking_lot` doesn't have poisoning or thread-ownership tracking, so deadlock risk is minimal. The design intentionally stores its own `Runtime` for sync API bridging.
 

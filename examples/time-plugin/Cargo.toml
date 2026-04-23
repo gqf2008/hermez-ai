@@ -1,5 +1,5 @@
 [package]
-name = "hermes-time-plugin"
+name = "hermez-time-plugin"
 version = "0.1.0"
 edition = "2021"
 

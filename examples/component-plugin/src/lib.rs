@@ -1,4 +1,4 @@
-//! Example Hermes Component Model plugin.
+//! Example Hermez Component Model plugin.
 //!
 //! Uses wit-bindgen (via cargo-component) for type-safe host-guest interfaces.
 //! Build: cargo component build --release
@@ -9,9 +9,9 @@ mod bindings;
 use bindings::exports::hermez::plugin::plugin::Guest;
 use bindings::hermez::plugin::host;
 
-struct HermesPlugin;
+struct HermezPlugin;
 
-impl Guest for HermesPlugin {
+impl Guest for HermezPlugin {
     fn register() {
         host::log("info", "Component plugin 'example-component-plugin' registered");
     }
@@ -36,4 +36,4 @@ impl Guest for HermesPlugin {
     }
 }
 
-bindings::export!(HermesPlugin with_types_in bindings);
+bindings::export!(HermezPlugin with_types_in bindings);

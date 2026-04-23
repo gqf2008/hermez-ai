@@ -5,7 +5,7 @@ description: >
   quality gates, independent reviewer subagent, and auto-fix loop. Use after
   code changes and before committing, pushing, or opening a PR.
 version: 2.0.0
-author: Hermes Agent (adapted from obra/superpowers + MorAlekss)
+author: Hermez Agent (adapted from obra/superpowers + MorAlekss)
 license: MIT
 metadata:
   hermes:

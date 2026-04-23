@@ -1,6 +1,6 @@
-//! Hermes Agent CLI — main entry point.
+//! Hermez Agent CLI — main entry point.
 //!
-//! Replaces the Python `hermes` command (hermes_cli.main:main).
+//! Replaces the Python `hermez` command (hermez_cli.main:main).
 //! Supports subcommands: chat, setup, tools, skills, gateway, doctor, etc.
 //!
 //! Command schemas and dispatch logic have been extracted to `src/commands/`.
@@ -8,7 +8,7 @@
 mod commands;
 
 use clap::Parser;
-use hermes_cli::app::HermesApp;
+use hermez_cli::app::HermezApp;
 use tracing_subscriber::EnvFilter;
 
 use commands::{Cli, dispatch::dispatch_command};
@@ -27,17 +27,17 @@ fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    // Set Hermes home if provided
-    if let Some(home) = cli.hermes_home {
-        hermes_core::hermes_home::set_hermes_home(&home)
+    // Set Hermez home if provided
+    if let Some(home) = cli.hermez_home {
+        hermez_core::hermez_home::set_hermez_home(&home)
             .ok();
     } else if let Some(profile) = cli.profile {
-        // Resolve profile name to path and set as HERMES_HOME
-        let profile_path = hermes_core::hermes_home::resolve_profile_path(&profile);
-        hermes_core::hermes_home::set_hermes_home(&profile_path)
+        // Resolve profile name to path and set as HERMEZ_HOME
+        let profile_path = hermez_core::hermez_home::resolve_profile_path(&profile);
+        hermez_core::hermez_home::set_hermez_home(&profile_path)
             .ok();
     }
 
-    let app = HermesApp::new()?;
+    let app = HermezApp::new()?;
     dispatch_command(&app, cli.command)
 }

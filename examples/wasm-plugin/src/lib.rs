@@ -1,4 +1,4 @@
-//! Example Hermes WASM plugin.
+//! Example Hermez WASM plugin.
 //!
 //! Demonstrates the Phase 2 ABI:
 //!   • export `memory`

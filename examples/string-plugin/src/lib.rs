@@ -1,4 +1,4 @@
-//! Hermes String Plugin — text processing utilities.
+//! Hermez String Plugin — text processing utilities.
 //!
 //! Tools:
 //!   string_reverse  → reverse a string

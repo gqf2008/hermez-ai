@@ -1,4 +1,4 @@
-# Hermes Agent E2E 测试报告
+# Hermez Agent E2E 测试报告
 
 **测试时间：** 2026-04-16
 **环境：** Windows 10 / Rust Release 构建
@@ -156,8 +156,8 @@
 
 | # | Bug | 文件 | 修复内容 |
 |---|-----|------|----------|
-| 1 | 模型名未从配置加载 | `crates/hermes-cli/src/app.rs:48` | `.or_else(\|\| self.config.model.name.clone())` |
-| 2 | base_url/api_key 丢失 | `crates/hermes-cli/src/app.rs:85-88` | 显式赋值到 AgentConfig |
-| 3 | 空 x-api-key 发送 | `crates/hermes-llm/src/anthropic.rs:724-727` | `if !self.api_key.is_empty()` 保护 |
-| 4 | 空 user-agent 被拦截 | `crates/hermes-llm/src/client.rs:196` | `.user_agent("reqwest/0.12.12")` |
+| 1 | 模型名未从配置加载 | `crates/hermez-cli/src/app.rs:48` | `.or_else(\|\| self.config.model.name.clone())` |
+| 2 | base_url/api_key 丢失 | `crates/hermez-cli/src/app.rs:85-88` | 显式赋值到 AgentConfig |
+| 3 | 空 x-api-key 发送 | `crates/hermez-llm/src/anthropic.rs:724-727` | `if !self.api_key.is_empty()` 保护 |
+| 4 | 空 user-agent 被拦截 | `crates/hermez-llm/src/client.rs:196` | `.user_agent("reqwest/0.12.12")` |
 | 5 | `hermes skills list` 参数错误 | `src/main.rs:1328` | action 从 `&source` 改为 `"list"` |

@@ -2,13 +2,13 @@
 name: honcho
 description: Configure and use Honcho memory with Hermes -- cross-session user modeling, multi-profile peer isolation, observation config, dialectic reasoning, session summaries, and context budget enforcement. Use when setting up Honcho, troubleshooting memory, managing profiles with Honcho peers, or tuning observation, recall, and dialectic settings.
 version: 2.0.0
-author: Hermes Agent
+author: Hermez Agent
 license: MIT
 metadata:
   hermes:
     tags: [Honcho, Memory, Profiles, Observation, Dialectic, User-Modeling, Session-Summary]
     homepage: https://docs.honcho.dev
-    related_skills: [hermes-agent]
+    related_skills: [hermez-agent]
 prerequisites:
   pip: [honcho-ai]
 ---
@@ -386,7 +386,7 @@ This fix addresses edge cases where raw user conclusions containing markup or sp
 ## Troubleshooting
 
 ### "Honcho not configured"
-Run `hermes honcho setup`. Ensure `memory.provider: honcho` is in `~/.hermes/config.yaml`.
+Run `hermes honcho setup`. Ensure `memory.provider: honcho` is in `~/.hermez/config.yaml`.
 
 ### Memory not persisting across sessions
 Check `hermes honcho status` -- verify `saveMessages: true` and `writeFrequency` isn't `session` (which only writes on exit).

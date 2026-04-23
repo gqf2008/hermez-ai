@@ -1,4 +1,4 @@
-//! Hermes CLI command definitions and dispatch.
+//! Hermez CLI command definitions and dispatch.
 //!
 //! This module contains all clap argument schemas and the command dispatch logic.
 //! Extracted from the original 1,900-line `main.rs`.
@@ -8,7 +8,7 @@ pub mod dispatch;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "hermes", about = "Hermes Agent CLI", version)]
+#[command(name = "hermez", about = "Hermez Agent CLI", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -17,11 +17,11 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Hermes home directory override (profiles)
+    /// Hermez home directory override (profiles)
     #[arg(long, global = true)]
-    pub hermes_home: Option<String>,
+    pub hermez_home: Option<String>,
 
-    /// Profile name (resolves HERMES_HOME before subcommands)
+    /// Profile name (resolves HERMEZ_HOME before subcommands)
     #[arg(short = 'p', long, global = true)]
     pub profile: Option<String>,
 }
@@ -98,7 +98,7 @@ pub enum Commands {
         #[arg(long)]
         reset: bool,
     },
-    /// Backup Hermes state
+    /// Backup Hermez state
     Backup {
         /// Output directory (default: current dir)
         #[arg(short, long)]
@@ -335,7 +335,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: PairingAction,
     },
-    /// Self-update Hermes Agent
+    /// Self-update Hermez Agent
     Update {
         /// Use preview (pre-release) channel
         #[arg(long)]
@@ -347,7 +347,7 @@ pub enum Commands {
         #[arg(long)]
         gateway: bool,
     },
-    /// Uninstall Hermes Agent
+    /// Uninstall Hermez Agent
     Uninstall {
         /// Preserve data directory
         #[arg(long)]

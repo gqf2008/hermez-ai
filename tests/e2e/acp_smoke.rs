@@ -1,4 +1,4 @@
-//! E2E smoke tests for the Hermes ACP binary.
+//! E2E smoke tests for the Hermez ACP binary.
 
 use std::process::Command;
 
@@ -6,7 +6,7 @@ use std::process::Command;
 #[ignore = "requires cargo build"]
 fn test_acp_binary_help() {
     let output = Command::new("cargo")
-        .args(["run", "--bin", "hermes-acp", "--", "--help"])
+        .args(["run", "--bin", "hermez-acp", "--", "--help"])
         .output()
         .unwrap();
     assert!(output.status.success());

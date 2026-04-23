@@ -1,0 +1,19 @@
+[package]
+name = "hermez-batch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hermez-core.workspace = true
+hermez-agent-engine.workspace = true
+hermez-tools.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+indicatif.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+rand.workspace = true

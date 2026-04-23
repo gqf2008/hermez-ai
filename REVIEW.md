@@ -1,9 +1,9 @@
-# hermes-rs Comprehensive Review
+# hermez-rs Comprehensive Review
 
 > Review date: 2026-04-18  
 > Codebase: ~124K lines across 245 `.rs` files, 13 crates  
 > Tests: ~2,039 passing, 0 failures  
-> Build: All 3 binaries compile (`hermes`, `hermes-agent`, `hermes-acp`)
+> Build: All 3 binaries compile (`hermez`, `hermez-agent`, `hermez-acp`)
 
 ---
 
@@ -26,7 +26,7 @@ The Rust rewrite is **structurally sound** with good crate separation, comprehen
 ## 🔴 Critical Issues (Fix Before Production)
 
 ### 1. `message_loop.rs` — Deadlock: `std::sync::Mutex` held across `.await`
-**File:** `crates/hermes-agent-engine/src/message_loop.rs:63,96`
+**File:** `crates/hermez-agent-engine/src/message_loop.rs:63,96`
 
 ```rust
 pub struct MessageLoop {
@@ -46,7 +46,7 @@ pub async fn process_message(&mut self, msg: PlatformMessage) -> Result<MessageR
 ---
 
 ### 2. `docker_env.rs` — Panic on Drop in async context
-**File:** `crates/hermes-tools/src/environments/docker_env.rs:99-106`
+**File:** `crates/hermez-tools/src/environments/docker_env.rs:99-106`
 
 ```rust
 fn block_on<F, T>(f: F) -> Result<T, String> {
@@ -61,7 +61,7 @@ fn block_on<F, T>(f: F) -> Result<T, String> {
 ---
 
 ### 3. `skills_hub.rs` — Thread pool starvation via `block_in_place` + `block_on`
-**File:** `crates/hermes-tools/src/skills_hub.rs:709`
+**File:** `crates/hermez-tools/src/skills_hub.rs:709`
 
 ```rust
 tokio::task::block_in_place(|| {
@@ -75,7 +75,7 @@ Can **panic or starve the thread pool** with `current_thread` runtime or when bl
 ---
 
 ### 4. `terminal.rs` — Async executor thread blocked for up to 600s
-**File:** `crates/hermes-tools/src/terminal.rs:360-404`
+**File:** `crates/hermez-tools/src/terminal.rs:360-404`
 
 Synchronous subprocess execution with `std::thread::sleep(100ms)` polling loop. Called from the async agent loop. **Blocks the executor thread** for the full command duration.  
 **Fix:** Use `tokio::process::Command` or wrap in `spawn_blocking`.
@@ -83,7 +83,7 @@ Synchronous subprocess execution with `std::thread::sleep(100ms)` polling loop. 
 ---
 
 ### 5. WhatsApp bridge — Process-group kill can self-DoS
-**File:** `crates/hermes-gateway/src/platforms/whatsapp.rs:376-395`
+**File:** `crates/hermez-gateway/src/platforms/whatsapp.rs:376-395`
 
 ```rust
 libc::kill(-(pid as i32), libc::SIGTERM);
@@ -95,7 +95,7 @@ If `pid` is `0`, negated value is `0`, which signals **all processes in the call
 ---
 
 ### 6. SSH remote execution — Command injection
-**File:** `crates/hermes-tools/src/environments/ssh.rs:96-133`
+**File:** `crates/hermez-tools/src/environments/ssh.rs:96-133`
 
 ```rust
 format!("cd {effective_cwd} && {command}")
@@ -107,7 +107,7 @@ Both variables are user-controlled. Passed as single argument to `ssh`, which ex
 ---
 
 ### 7. Python sandbox — Trivially bypassable
-**File:** `crates/hermes-tools/src/code_exec/executor.rs:32-43`
+**File:** `crates/hermez-tools/src/code_exec/executor.rs:32-43`
 
 Security check is simple `code.contains(...)` for three literal strings. Easily bypassed with string concatenation, base64 decoding, etc.  
 **Fix:** Use AST-based import analyzer or run in seccomp/namespace sandbox.
@@ -115,7 +115,7 @@ Security check is simple `code.contains(...)` for three literal strings. Easily 
 ---
 
 ### 8. ACP server loop — Panic on serialization failure
-**File:** `crates/hermes-acp/src/lib.rs:1304,1324,1333`
+**File:** `crates/hermez-acp/src/lib.rs:1304,1324,1333`
 
 ```rust
 let bytes = serde_json::to_vec(&error_resp).unwrap();
@@ -127,7 +127,7 @@ Inside the main JSON-RPC message loop. Non-string JSON map keys will **panic the
 ---
 
 ### 9. Gateway SSE — Panic aborts HTTP stream
-**File:** `crates/hermes-gateway/src/platforms/api_server.rs:1436,1981,2137,2162,2183`
+**File:** `crates/hermez-gateway/src/platforms/api_server.rs:1436,1981,2137,2162,2183`
 
 ```rust
 fn make_event(data: impl serde::Serialize) -> Event {
@@ -141,7 +141,7 @@ Panic inside `async_stream` SSE generator **aborts the HTTP response mid-flight*
 ---
 
 ### 10. Browser tools — Panic on runtime creation failure
-**File:** `crates/hermes-tools/src/browser/mod.rs` (9 instances)
+**File:** `crates/hermez-tools/src/browser/mod.rs` (9 instances)
 
 ```rust
 tokio::runtime::Builder::new_current_thread()
@@ -160,7 +160,7 @@ Will panic in sandboxed containers, WASM, or nested runtimes.
 |---|---------|------|--------|
 | 1 | **Modal environment** | `environments/modal.rs` | Entire skeleton — all methods return error/no-op |
 | 2 | **Daytona environment** | `environments/daytona.rs` | Entire skeleton — all methods return error/no-op |
-| 3 | **ACP prompt handler** | `hermes-acp/src/lib.rs:852` | Returns hardcoded placeholder; no LLM call |
+| 3 | **ACP prompt handler** | `hermez-acp/src/lib.rs:852` | Returns hardcoded placeholder; no LLM call |
 | 4 | **API server SSE streaming** | `api_server.rs:1313` | Tool call events not wired through agent engine |
 | 5 | **Codex streaming** | `codex.rs:1059` | Returns empty shell response |
 | 6 | **Singularity `docker://` images** | `singularity.rs:411` | Not converted to SIF; most common use case broken |
@@ -188,7 +188,7 @@ Will panic in sandboxed containers, WASM, or nested runtimes.
 **Fix:** Replace `std::fs` with `tokio::fs`; replace `std::sync::Mutex` with `tokio::sync::Mutex` or `parking_lot::Mutex`; use `spawn_blocking` for long operations.
 
 ### Large error variants (clippy)
-**File:** `crates/hermes-llm/src/error_classifier.rs:63`
+**File:** `crates/hermez-llm/src/error_classifier.rs:63`
 
 `ClassifiedError` contains `HashMap<String, Value>` (large). Used as `Err` variant in `Result` across ~8 high-traffic functions. Increases enum size and hurts performance.  
 **Fix:** `Box<ClassifiedError>` or `Arc<ClassifiedError>`.
@@ -207,10 +207,10 @@ Will panic in sandboxed containers, WASM, or nested runtimes.
 ### src/main.rs bloat
 `src/main.rs` is **1,900 lines** — almost entirely clap `Subcommand` enums and dispatch logic. This should be split into subcommand modules.
 
-### hermes-acp dual implementation
+### hermez-acp dual implementation
 There are **two ACP implementations**:
-1. `crates/hermes-acp/src/lib.rs` — crate-level skeleton (1,528 lines, placeholder `handle_prompt`)
-2. `src/hermes_acp/main.rs` — binary implementation (214 lines, actual LLM wiring via `AIAgent`)
+1. `crates/hermez-acp/src/lib.rs` — crate-level skeleton (1,528 lines, placeholder `handle_prompt`)
+2. `src/hermez_acp/main.rs` — binary implementation (214 lines, actual LLM wiring via `AIAgent`)
 
 The binary is what `hermes acp run` delegates to. The crate library is misleading — it looks like the real implementation but can't process prompts.
 
@@ -231,15 +231,15 @@ Many gateway platform files have `#[allow(dead_code)]` on struct fields (e.g., `
 ### Test coverage distribution
 | Crate | Tests | Lines | Density |
 |-------|-------|-------|---------|
-| `hermes-tools` | 675 | 32,529 | 1.03% |
-| `hermes-llm` | 441 | 19,999 | 1.05% |
-| `hermes-agent-engine` | 255 | 10,841 | 1.12% |
-| `hermes-gateway` | 181 | 17,917 | 0.50% |
-| `hermes-cli` | 171 | 19,676 | 0.43% |
-| `hermes-acp` | 12 | 1,528 | 0.39% |
-| `hermes-rl` | 22 | 3,363 | 0.32% |
+| `hermez-tools` | 675 | 32,529 | 1.03% |
+| `hermez-llm` | 441 | 19,999 | 1.05% |
+| `hermez-agent-engine` | 255 | 10,841 | 1.12% |
+| `hermez-gateway` | 181 | 17,917 | 0.50% |
+| `hermez-cli` | 171 | 19,676 | 0.43% |
+| `hermez-acp` | 12 | 1,528 | 0.39% |
+| `hermez-rl` | 22 | 3,363 | 0.32% |
 
-`hermes-acp` and `hermes-rl` are undertested relative to their size.
+`hermez-acp` and `hermez-rl` are undertested relative to their size.
 
 ---
 

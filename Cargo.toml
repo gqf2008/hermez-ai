@@ -1,27 +1,27 @@
 [package]
-name = "hermes"
+name = "hermez"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "hermes"
+name = "hermez"
 path = "src/main.rs"
 
 [[bin]]
-name = "hermes-agent"
-path = "src/hermes_agent/main.rs"
+name = "hermez-agent"
+path = "src/hermez_agent/main.rs"
 
 [[bin]]
-name = "hermes-acp"
-path = "src/hermes_acp/main.rs"
+name = "hermez-acp"
+path = "src/hermez_acp/main.rs"
 
 [dependencies]
-hermes-cli.workspace = true
-hermes-core.workspace = true
-hermes-state.workspace = true
-hermes-agent-engine.workspace = true
-hermes-tools.workspace = true
+hermez-cli.workspace = true
+hermez-core.workspace = true
+hermez-state.workspace = true
+hermez-agent-engine.workspace = true
+hermez-tools.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -40,26 +40,26 @@ reqwest.workspace = true
 
 [workspace]
 members = [
-    "crates/hermes-core",
-    "crates/hermes-state",
-    "crates/hermes-llm",
-    "crates/hermes-tools",
-    "crates/hermes-prompt",
-    "crates/hermes-agent-engine",
-    "crates/hermes-cli",
-    "crates/hermes-cron",
-    "crates/hermes-batch",
-    "crates/hermes-compress",
-    "crates/hermes-gateway",
-    "crates/hermes-rl",
+    "crates/hermez-core",
+    "crates/hermez-state",
+    "crates/hermez-llm",
+    "crates/hermez-tools",
+    "crates/hermez-prompt",
+    "crates/hermez-agent-engine",
+    "crates/hermez-cli",
+    "crates/hermez-cron",
+    "crates/hermez-batch",
+    "crates/hermez-compress",
+    "crates/hermez-gateway",
+    "crates/hermez-rl",
 ]
 default-members = [
-    "crates/hermes-core",
-    "crates/hermes-state",
-    "crates/hermes-llm",
-    "crates/hermes-tools",
-    "crates/hermes-prompt",
-    "crates/hermes-agent-engine",
+    "crates/hermez-core",
+    "crates/hermez-state",
+    "crates/hermez-llm",
+    "crates/hermez-tools",
+    "crates/hermez-prompt",
+    "crates/hermez-agent-engine",
 ]
 resolver = "2"
 
@@ -67,24 +67,24 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.84"
-authors = ["Hermes Agent Contributors"]
+authors = ["Hermez Agent Contributors"]
 license = "MIT"
-repository = "https://github.com/NousResearch/hermes-agent"
+repository = "https://github.com/NousResearch/hermez-agent"
 
 [workspace.dependencies]
 # Core
-hermes-core = { path = "crates/hermes-core" }
-hermes-state = { path = "crates/hermes-state" }
-hermes-llm = { path = "crates/hermes-llm" }
-hermes-tools = { path = "crates/hermes-tools" }
-hermes-prompt = { path = "crates/hermes-prompt" }
-hermes-agent-engine = { path = "crates/hermes-agent-engine" }
-hermes-cli = { path = "crates/hermes-cli" }
-hermes-cron = { path = "crates/hermes-cron" }
-hermes-batch = { path = "crates/hermes-batch" }
-hermes-compress = { path = "crates/hermes-compress" }
-hermes-gateway = { path = "crates/hermes-gateway" }
-hermes-rl = { path = "crates/hermes-rl" }
+hermez-core = { path = "crates/hermez-core" }
+hermez-state = { path = "crates/hermez-state" }
+hermez-llm = { path = "crates/hermez-llm" }
+hermez-tools = { path = "crates/hermez-tools" }
+hermez-prompt = { path = "crates/hermez-prompt" }
+hermez-agent-engine = { path = "crates/hermez-agent-engine" }
+hermez-cli = { path = "crates/hermez-cli" }
+hermez-cron = { path = "crates/hermez-cron" }
+hermez-batch = { path = "crates/hermez-batch" }
+hermez-compress = { path = "crates/hermez-compress" }
+hermez-gateway = { path = "crates/hermez-gateway" }
+hermez-rl = { path = "crates/hermez-rl" }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -176,6 +176,18 @@ rstest = "0.24"
 mockito = "1"
 proptest = "1"
 tokio-test = "0.4"
+
+[dev-dependencies]
+mockito.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+hermez-agent-engine.workspace = true
+hermez-tools.workspace = true
+hermez-llm.workspace = true
+hermez-state.workspace = true
+hermez-gateway.workspace = true
+hermez-core.workspace = true
 
 [profile.release]
 lto = "thin"

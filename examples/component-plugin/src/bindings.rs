@@ -41,7 +41,7 @@ pub mod hermez {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
-            /// Get a config value by key (from ~/.hermes/config.yaml).
+            /// Get a config value by key (from ~/.hermez/config.yaml).
             pub fn get_config(key: &str) -> Option<_rt::String> {
                 unsafe {
                     #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
@@ -97,7 +97,7 @@ pub mod hermez {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
-            /// Invoke another Hermes tool by name with JSON args.
+            /// Invoke another Hermez tool by name with JSON args.
             pub fn invoke_tool(
                 name: &str,
                 args: &str,

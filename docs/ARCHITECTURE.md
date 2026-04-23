@@ -7,7 +7,7 @@
 |                         Binary Targets (Tier 5)                        |
 |                                                                        |
 |  ┌──────────────┐  ┌─────────────────┐  ┌──────────────────────────┐   |
-|  │   hermes     │  │  hermes-agent   │  │      hermes-acp          │   |
+|  │   hermes     │  │  hermez-agent   │  │      hermez-acp          │   |
 |  │  (main CLI)  │  │ (standalone)    │  │ (JSON-RPC IDE server)    │   |
 |  │  31 cmds     │  │ single-purpose  │  │ 13 methods, sessions     │   |
 |  └──────┬───────┘  └────────┬────────┘  └──────────┬───────────────┘   |
@@ -17,12 +17,12 @@
 |  ┌──────▼──────────────────▼───────────────────────▼──────────────┐    |
 |  │                    CLI / Adapter Layer (Tier 4)                 │    |
 |  │                                                                 │    |
-|  │  hermes-cli          hermes-compress      hermes-batch          │    |
+|  │  hermez-cli          hermez-compress      hermez-batch          │    |
 |  │  31 subcommands      Context compression  Batch processing      │    |
 |  │  TUI, config         4-stage algorithm    Multi-session         │    |
 |  │  backup, cron, etc.                         │                   │    |
 |  │                                             │                   │    |
-|  │  hermes-cron         hermes-gateway         │                   │    |
+|  │  hermez-cron         hermez-gateway         │                   │    |
 |  │  Scheduler           19 platform adapters   │                   │    |
 |  │  Job mgmt            Telegram/Discord/      │                   │    |
 |  │                      Weixin/Feishu/...      │                   │    |
@@ -60,7 +60,7 @@
 |  │                  Service Layer (Tier 2)                        │    |
 |  │                                                                │    |
 |  │  ┌─────────────────────┐  ┌──────────────────────────────┐    │    |
-|  │  │    hermes-tools     │  │       hermes-prompt          │    │    |
+|  │  │    hermez-tools     │  │       hermez-prompt          │    │    |
 |  │  │                     │  │                              │    │    |
 |  │  │  ToolRegistry       │  │  build_system_prompt         │    │    |
 |  │  │  register_all_tools │  │  ContextCompressor (4-stage) │    │    |
@@ -75,7 +75,7 @@
 |  │  │  rl_training, moa   │  │  9 modules                   │    │    |
 |  │  │                     │  │                              │    │    |
 |  │  │  Toolsets:          │  │                              │    │    |
-|  │  │  hermes-cli, web,   │  │                              │    │    |
+|  │  │  hermez-cli, web,   │  │                              │    │    |
 |  │  │  terminal, file,    │  │                              │    │    |
 |  │  │  vision, browser,   │  │                              │    │    |
 |  │  │  skills, delegate,  │  │                              │    │    |
@@ -96,7 +96,7 @@
 |  │              Infrastructure Layer (Tier 1)                    │      |
 |  │                                                              │      |
 |  │  ┌───────────────────┐  ┌─────────────────┐  ┌───────────┐  │      |
-|  │  │   hermes-llm      │  │  hermes-state   │  │hermes-gate│  │      |
+|  │  │   hermez-llm      │  │  hermez-state   │  │hermez-gate│  │      |
 |  │  │                   │  │                 │  │ (platform)│  │      |
 |  │  │  call_llm()       │  │  SessionDB      │  │           │  │      |
 |  │  │  ProviderType(11) │  │  SQLite+WAL     │  │ Platform  │  │      |
@@ -121,7 +121,7 @@
 |  │              Core Layer (Tier 0)                              │      |
 |  │                                                              │      |
 |  │  ┌──────────────────────────────────────────────────────┐   │      |
-|  │  │                   hermes-core                         │   │      |
+|  │  │                   hermez-core                         │   │      |
 |  │  │                                                       │   │      |
 |  │  │  HermesConfig (load/save, defaults, env vars)        │   │      |
 |  │  │  HermesError + ErrorCategory                          │   │      |
@@ -139,12 +139,12 @@
                          hermes (workspace root)
                     ┌──────┬───────┬───────┐
                     │      │       │       │
-              hermes-cli  │  hermes-agent  hermes-acp
+              hermez-cli  │  hermez-agent  hermez-acp
                     │     │       │       │
                     │     └───┬───┘       │
                     │         │           │
               ┌─────▼─────────▼───────────▼────┐
-              │        hermes-agent-engine      │
+              │        hermez-agent-engine      │
               │  agent, message_loop, failover   │
               │  memory, subagent, skill cmds   │
               │  self_evolution, review_agent   │
@@ -158,7 +158,7 @@
           └────┬────┘ └───┬───┘ └───┬───┘ │
                │          │         │     │
           ┌────▼──────────▼─────────▼─────▼───┐
-          │         hermes-llm                 │
+          │         hermez-llm                 │
           │  client, provider, anthropic       │
           │  codex, credential_pool,           │
           │  error_classifier, auxiliary,      │
@@ -167,17 +167,17 @@
           └──────────────┬─────────────────────┘
                          │
           ┌──────────────▼─────────────────────┐
-          │         hermes-core                 │
+          │         hermez-core                 │
           │  HermesConfig, HermesError,         │
           │  Result<T>, constants               │
           └─────────────────────────────────────┘
 
   Additional crates (optional/default-excluded):
 
-  hermes-gateway ──→ hermes-core
-  hermes-cron      ──→ hermes-core
-  hermes-compress  ──→ hermes-core
-  hermes-batch     ──→ hermes-core
+  hermez-gateway ──→ hermez-core
+  hermez-cron      ──→ hermez-core
+  hermez-compress  ──→ hermez-core
+  hermez-batch     ──→ hermez-core
 ```
 
 ## 3. Agent Engine Internal Architecture
@@ -331,7 +331,7 @@
 │                                                                   │
 │  Toolsets (composition via includes):                             │
 │  ┌─────────────────────────────────────────────────────────┐     │
-│  │  hermes-cli (33 core tools)                              │     │
+│  │  hermez-cli (33 core tools)                              │     │
 │  │  web, terminal, file, vision, image, browser             │     │
 │  │  skills, planning, memory, code, delegate                │     │
 │  │  cron, voice, tts, ha, session_search                    │     │
@@ -351,7 +351,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      hermes-gateway                              │
+│                      hermez-gateway                              │
 │                                                                   │
 │  ┌───────────────────────────────────────────────────────────┐   │
 │  │                    Platform enum (20)                      │   │
@@ -387,7 +387,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        hermes (CLI)                              │
 │                                                                  │
-│  clap arg parsing → hermes-cli dispatch → 31 subcommands:       │
+│  clap arg parsing → hermez-cli dispatch → 31 subcommands:       │
 │  chat, setup, doctor, config, tools, skills, models, status,    │
 │  sessions, backup, restore, gateway, cron, profiles, insights,  │
 │  update, uninstall, completion, acp, logs, debug, dump,         │
@@ -399,7 +399,7 @@
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                     hermes-agent (standalone)                    │
+│                     hermez-agent (standalone)                    │
 │                                                                  │
 │  clap: --model --max-iterations --enabled-toolsets              │
 │        --disabled-toolsets --quiet --save-trajectories          │
@@ -410,7 +410,7 @@
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                    hermes-acp (IDE integration)                  │
+│                    hermez-acp (IDE integration)                  │
 │                                                                  │
 │  JSON-RPC 2.0 over stdin/stdout                                  │
 │                                                                  │
@@ -430,24 +430,24 @@
 
 | Python Module | Rust Equivalent | Status |
 |---------------|----------------|--------|
-| `run_agent.py:AIAgent` | `hermes-agent-engine/agent.rs:AIAgent` | Aligned |
-| `config.py:load_config` | `hermes-core/config.rs:HermesConfig::load` | + env expand |
-| `toolsets.py` | `hermes-tools/toolsets_def.rs` | 20+ toolsets |
-| `model_tools.py` | `hermes-tools/` (55 files) | Aligned |
-| `hermes_state.py` | `hermes-state/session_db.rs:SessionDB` | FTS5 |
-| `cli.py` | `hermes-cli/` (31 subcommands) | Aligned |
-| `_recover_with_credential_pool` | `hermes-agent-engine/failover.rs` | Aligned |
-| `MemoryProvider` (ABC) | `hermes-agent-engine/memory_provider.rs` | Trait defined |
-| `_extract_reasoning` | `hermes-llm/reasoning.rs` | 4 formats |
-| `prompt builder` | `hermes-prompt/builder.rs` | + cache control |
-| `context_compressor.py` | `hermes-prompt/context_compressor.rs` | 4-stage |
-| `gateway/run.py` | `hermes-gateway/runner.rs` | 20 platforms |
-| `cron/jobs.py` | `hermes-cron/` | Aligned |
-| `acp_adapter/` | `hermes-acp/` | 13 methods |
+| `run_agent.py:AIAgent` | `hermez-agent-engine/agent.rs:AIAgent` | Aligned |
+| `config.py:load_config` | `hermez-core/config.rs:HermesConfig::load` | + env expand |
+| `toolsets.py` | `hermez-tools/toolsets_def.rs` | 20+ toolsets |
+| `model_tools.py` | `hermez-tools/` (55 files) | Aligned |
+| `hermez_state.py` | `hermez-state/session_db.rs:SessionDB` | FTS5 |
+| `cli.py` | `hermez-cli/` (31 subcommands) | Aligned |
+| `_recover_with_credential_pool` | `hermez-agent-engine/failover.rs` | Aligned |
+| `MemoryProvider` (ABC) | `hermez-agent-engine/memory_provider.rs` | Trait defined |
+| `_extract_reasoning` | `hermez-llm/reasoning.rs` | 4 formats |
+| `prompt builder` | `hermez-prompt/builder.rs` | + cache control |
+| `context_compressor.py` | `hermez-prompt/context_compressor.rs` | 4-stage |
+| `gateway/run.py` | `hermez-gateway/runner.rs` | 20 platforms |
+| `cron/jobs.py` | `hermez-cron/` | Aligned |
+| `acp_adapter/` | `hermez-acp/` | 13 methods |
 
 ## 9. Web Dashboard API
 
-The web dashboard (`hermes-cli/src/web_server.rs`) serves a React SPA from `web/dist/` and provides REST/SSE endpoints for session management, real-time chat, and system administration.
+The web dashboard (`hermez-cli/src/web_server.rs`) serves a React SPA from `web/dist/` and provides REST/SSE endpoints for session management, real-time chat, and system administration.
 
 ### API Endpoints
 
@@ -461,8 +461,8 @@ The web dashboard (`hermes-cli/src/web_server.rs`) serves a React SPA from `web/
 | POST | `/api/sessions/:id/rename` | Rename session |
 | POST | `/api/sessions/:id/chat` | Blocking chat (returns full response) |
 | POST | `/api/sessions/:id/chat-stream` | **SSE streaming chat** (delta → done) |
-| GET | `/api/config` | Read `~/.hermes/config.yaml` |
-| POST | `/api/config` | Write `~/.hermes/config.yaml` |
+| GET | `/api/config` | Read `~/.hermez/config.yaml` |
+| POST | `/api/config` | Write `~/.hermez/config.yaml` |
 | GET | `/api/cron` | List cron jobs |
 | GET | `/api/plugins` | Discover installed plugins |
 
@@ -507,7 +507,7 @@ world hermez-plugin {
 
 ### Plugin Discovery
 
-1. `PluginManager::discover()` walks `~/.hermes/plugins/`
+1. `PluginManager::discover()` walks `~/.hermez/plugins/`
 2. Each directory with `plugin.yaml` → `PluginManifest`
 3. Manifest declares: tools, hooks, wasm/component entry points
 4. `auto_load()` registers tools into `ToolRegistry` and hooks into `HookRegistry`

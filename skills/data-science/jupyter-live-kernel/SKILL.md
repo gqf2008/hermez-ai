@@ -7,7 +7,7 @@ description: >
   building up complex code step-by-step. Uses terminal to run CLI commands against
   a live Jupyter kernel. No new tools required.
 version: 1.0.0
-author: Hermes Agent
+author: Hermez Agent
 license: MIT
 metadata:
   hermes:

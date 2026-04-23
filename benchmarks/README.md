@@ -1,6 +1,6 @@
-# Hermes Agent Benchmarks
+# Hermez Agent Benchmarks
 
-This directory contains benchmarks for evaluating Hermes Agent performance across key dimensions.
+This directory contains benchmarks for evaluating Hermez Agent performance across key dimensions.
 
 ## Benchmark Categories
 
@@ -11,27 +11,27 @@ This directory contains benchmarks for evaluating Hermes Agent performance acros
 
 ### 2. Session Throughput
 - **Target**: Sessions created per second
-- **Command**: `cargo bench -p hermes-state`
+- **Command**: `cargo bench -p hermez-state`
 - **Goal**: > 100 sessions/sec
 
 ### 3. LLM Provider Latency
 - **Target**: End-to-end request latency (mock server)
-- **Command**: `cargo test -p hermes-llm -- --ignored`
+- **Command**: `cargo test -p hermez-llm -- --ignored`
 - **Goal**: < 50ms overhead vs raw HTTP
 
 ### 4. Tool Execution Overhead
 - **Target**: Tool dispatch + execution latency
-- **Command**: `cargo bench -p hermes-tools`
+- **Command**: `cargo bench -p hermez-tools`
 - **Goal**: < 10ms per tool call
 
 ### 5. Context Compression
 - **Target**: Compression ratio and speed
-- **Command**: `cargo bench -p hermes-compress`
+- **Command**: `cargo bench -p hermez-compress`
 - **Goal**: 4-stage pipeline < 100ms
 
 ### 6. Gateway Message Throughput
 - **Target**: Messages processed per second per platform
-- **Command**: `cargo bench -p hermes-gateway`
+- **Command**: `cargo bench -p hermez-gateway`
 - **Goal**: > 1000 msg/sec (telegram mock)
 
 ## Running Benchmarks

@@ -1,4 +1,4 @@
-//! Hermes Time Plugin — time utilities for agents.
+//! Hermez Time Plugin — time utilities for agents.
 //!
 //! Tools:
 //!   time_now          → current UTC time as ISO-8601 + unix timestamp

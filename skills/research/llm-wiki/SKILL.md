@@ -2,7 +2,7 @@
 name: llm-wiki
 description: "Karpathy's LLM Wiki — build and maintain a persistent, interlinked markdown knowledge base. Ingest sources, query compiled knowledge, and lint for consistency."
 version: 2.0.0
-author: Hermes Agent
+author: Hermez Agent
 license: MIT
 metadata:
   hermes:
@@ -34,7 +34,7 @@ Use this skill when the user:
 
 ## Wiki Location
 
-**Location:** Set via `WIKI_PATH` environment variable (e.g. in `~/.hermes/.env`).
+**Location:** Set via `WIKI_PATH` environment variable (e.g. in `~/.hermez/.env`).
 
 If unset, defaults to `~/wiki`.
 

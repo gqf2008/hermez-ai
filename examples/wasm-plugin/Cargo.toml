@@ -1,5 +1,5 @@
 [package]
-name = "hermes-example-wasm-plugin"
+name = "hermez-example-wasm-plugin"
 version = "0.1.0"
 edition = "2021"
 

@@ -1,12 +1,12 @@
-# AGENTS.md — Hermes Agent (Rust)
+# AGENTS.md — Hermez Agent (Rust)
 
 > This file contains project-specific context for AI coding agents. Read it before making changes.
 
 ## Project Overview
 
-Hermes Agent CLI (`hermes-rs`) is a self-evolving AI agent system built by Nous Research. It is a Rust rewrite of an earlier Python implementation, organized as a Cargo workspace with 12 crates and 3 binary targets.
+Hermez Agent CLI (`hermez-rs`) is a self-evolving AI agent system built by Nous Research. It is a Rust rewrite of an earlier Python implementation, organized as a Cargo workspace with 12 crates and 3 binary targets.
 
-- **Repository:** `https://github.com/NousResearch/hermes-agent`
+- **Repository:** `https://github.com/NousResearch/hermez-agent`
 - **Language:** Rust (minimum version 1.84, edition 2021)
 - **License:** MIT
 - **Version:** 0.1.0
@@ -54,8 +54,8 @@ bash scripts/e2e_test.sh          # release build
 bash scripts/e2e_test.sh --debug  # debug build
 
 # Run a specific crate's tests
-cargo test -p hermes-llm
-cargo test -p hermes-agent-engine
+cargo test -p hermez-llm
+cargo test -p hermez-agent-engine
 
 # Check formatting and lints (standard Rust)
 cargo fmt --check
@@ -66,9 +66,9 @@ cargo clippy --workspace --all-targets
 
 After `cargo build --release`, three binaries are produced in `target/release/`:
 
-- `hermes` — Main CLI (31+ subcommands)
-- `hermes-agent` — Standalone conversation loop (stdin → stdout)
-- `hermes-acp` — JSON-RPC IDE server (stdin/stdout)
+- `hermez` — Main CLI (31+ subcommands)
+- `hermez-agent` — Standalone conversation loop (stdin → stdout)
+- `hermez-acp` — JSON-RPC IDE server (stdin/stdout)
 
 ---
 
@@ -78,45 +78,45 @@ The project follows a strict 5-tier layered architecture. Dependencies flow down
 
 ```
 Tier 5 — Binary Targets
-  hermes (CLI) | hermes-agent (standalone) | hermes-acp (IDE server)
+  hermes (CLI) | hermez-agent (standalone) | hermez-acp (IDE server)
 
 Tier 4 — CLI / Adapter Layer
-  hermes-cli (31 subcommands, TUI, config, backup)
-  hermes-gateway (19 platform adapters)
-  hermes-cron (scheduler, job mgmt)
-  hermes-batch (JSONL batch processing)
-  hermes-compress (4-stage context compression)
+  hermez-cli (31 subcommands, TUI, config, backup)
+  hermez-gateway (19 platform adapters)
+  hermez-cron (scheduler, job mgmt)
+  hermez-batch (JSONL batch processing)
+  hermez-compress (4-stage context compression)
 
 Tier 3 — Agent Engine Layer
-  hermes-agent-engine
+  hermez-agent-engine
     AIAgent::run_conversation(), tool dispatch, failover chain,
     memory manager, subagent delegation (depth ≤ 2, max 3 concurrent),
     smart model routing, title generator, trajectory saver,
     self-evolution, review agent, skill commands, budget tracking
 
 Tier 2 — Service Layer
-  hermes-tools (~60 tool modules, registry, toolsets, env backends)
-  hermes-prompt (system prompt builder, context compressor, cache control)
+  hermez-tools (~60 tool modules, registry, toolsets, env backends)
+  hermez-prompt (system prompt builder, context compressor, cache control)
 
 Tier 1 — Infrastructure Layer
-  hermes-llm (11 provider types, credential pool, retry, rate limit, token estimate)
-  hermes-state (SQLite session DB, WAL, FTS5, insights engine)
+  hermez-llm (11 provider types, credential pool, retry, rate limit, token estimate)
+  hermez-state (SQLite session DB, WAL, FTS5, insights engine)
 
 Tier 0 — Core Layer
-  hermes-core (HermesConfig, HermesError, constants, logging, home path)
+  hermez-core (HermesConfig, HermesError, constants, logging, home path)
 ```
 
 ### Crate Dependency Graph (simplified)
 
 ```
-hermes (root) → hermes-cli, hermes-agent-engine, hermes-acp
-hermes-cli → hermes-agent-engine, hermes-batch, hermes-cron, hermes-gateway
-hermes-agent-engine → hermes-llm, hermes-tools, hermes-prompt, hermes-state
-hermes-tools → hermes-llm, hermes-state
-hermes-llm → hermes-core
-hermes-prompt → hermes-llm
-hermes-state → hermes-core
-hermes-gateway, hermes-cron, hermes-compress, hermes-batch, hermes-rl → hermes-core
+hermes (root) → hermez-cli, hermez-agent-engine, hermez-acp
+hermez-cli → hermez-agent-engine, hermez-batch, hermez-cron, hermez-gateway
+hermez-agent-engine → hermez-llm, hermez-tools, hermez-prompt, hermez-state
+hermez-tools → hermez-llm, hermez-state
+hermez-llm → hermez-core
+hermez-prompt → hermez-llm
+hermez-state → hermez-core
+hermez-gateway, hermez-cron, hermez-compress, hermez-batch, hermez-rl → hermez-core
 ```
 
 ---
@@ -127,18 +127,18 @@ hermes-gateway, hermes-cron, hermes-compress, hermes-batch, hermes-rl → hermes
 
 | Crate | Responsibility | Default? |
 |-------|----------------|----------|
-| `hermes-core` | Config, errors, constants, home path, logging, platforms, redaction | Yes |
-| `hermes-state` | SQLite session DB, schema, models, insights, FTS5 search | Yes |
-| `hermes-llm` | LLM client, 11 providers, credential pool, retry, reasoning extraction, tool call parsing | Yes |
-| `hermes-tools` | Tool registry, ~60 tool impls, toolsets, env backends (local/docker/ssh/daytona/singularity/modal) | Yes |
-| `hermes-prompt` | System prompt builder, context compressor (4-stage), Anthropic cache control, injection scan, soul.md loader | Yes |
-| `hermes-agent-engine` | AIAgent core loop, failover chain, memory manager, subagent, smart routing, trajectories, title gen | Yes |
-| `hermes-cli` | 31 subcommand handlers, TUI, setup wizard, OAuth, backup, gateway mgmt | No (root depends on it) |
-| `hermes-gateway` | 19 platform enum, 5 implemented adapters, session store, dedup | No |
-| `hermes-cron` | Cron job scheduler, delivery, JSON job store | No |
-| `hermes-batch` | JSONL batch runner, checkpointing, distributions | No |
-| `hermes-compress` | Context compression and summarization | No |
-| `hermes-rl` | RL environments (tool-use, web-research, math, Atropos) | No |
+| `hermez-core` | Config, errors, constants, home path, logging, platforms, redaction | Yes |
+| `hermez-state` | SQLite session DB, schema, models, insights, FTS5 search | Yes |
+| `hermez-llm` | LLM client, 11 providers, credential pool, retry, reasoning extraction, tool call parsing | Yes |
+| `hermez-tools` | Tool registry, ~60 tool impls, toolsets, env backends (local/docker/ssh/daytona/singularity/modal) | Yes |
+| `hermez-prompt` | System prompt builder, context compressor (4-stage), Anthropic cache control, injection scan, soul.md loader | Yes |
+| `hermez-agent-engine` | AIAgent core loop, failover chain, memory manager, subagent, smart routing, trajectories, title gen | Yes |
+| `hermez-cli` | 31 subcommand handlers, TUI, setup wizard, OAuth, backup, gateway mgmt | No (root depends on it) |
+| `hermez-gateway` | 19 platform enum, 5 implemented adapters, session store, dedup | No |
+| `hermez-cron` | Cron job scheduler, delivery, JSON job store | No |
+| `hermez-batch` | JSONL batch runner, checkpointing, distributions | No |
+| `hermez-compress` | Context compression and summarization | No |
+| `hermez-rl` | RL environments (tool-use, web-research, math, Atropos) | No |
 
 ### Source Tree Layout
 
@@ -148,11 +148,11 @@ hermes-gateway, hermes-cron, hermes-compress, hermes-batch, hermes-rl → hermes
 │   ├── main.rs             # hermes binary entry point
 │   ├── commands/
 │   │   ├── mod.rs          # Clap CLI argument definitions (~1300 lines)
-│   │   └── dispatch.rs     # Command dispatch bridge to hermes-cli handlers
-│   ├── hermes_agent/
-│   │   └── main.rs         # hermes-agent standalone binary
-│   └── hermes_acp/
-│       ├── main.rs         # hermes-acp JSON-RPC server
+│   │   └── dispatch.rs     # Command dispatch bridge to hermez-cli handlers
+│   ├── hermez_agent/
+│   │   └── main.rs         # hermez-agent standalone binary
+│   └── hermez_acp/
+│       ├── main.rs         # hermez-acp JSON-RPC server
 │       ├── protocol.rs     # ACP message types
 │       ├── server.rs       # ACP method dispatch (13 methods)
 │       └── session.rs      # SessionManager
@@ -185,7 +185,7 @@ hermes-gateway, hermes-cron, hermes-compress, hermes-batch, hermes-rl → hermes
 3. **Error handling:**
    - Use `thiserror` for structured error enums in libraries.
    - Use `anyhow` for application-level error propagation.
-   - The project defines a unified `HermesError` in `hermes-core` with `ErrorCategory` for classification.
+   - The project defines a unified `HermesError` in `hermez-core` with `ErrorCategory` for classification.
    - `Result<T>` is aliased to `std::result::Result<T, HermesError>`.
 4. **Async:** All async code uses `tokio`. `async-trait` is used for trait-based async abstractions.
 5. **Logging:** Use `tracing` macros (`tracing::info!`, `tracing::warn!`, `tracing::error!`). Do not use `println!` in library crates.
@@ -208,7 +208,7 @@ hermes-gateway, hermes-cron, hermes-compress, hermes-batch, hermes-rl → hermes
 
 Tests live in three places:
 - `#[cfg(test)]` modules at the bottom of source files (most common — ~190 modules).
-- Separate `tests/` directories inside crates (e.g., `crates/hermes-agent-engine/tests/`).
+- Separate `tests/` directories inside crates (e.g., `crates/hermez-agent-engine/tests/`).
 - Inline `#[test]` functions within source files.
 
 Key testing patterns:
@@ -241,10 +241,10 @@ When adding a new CLI subcommand, add a corresponding `run_test` call in this sc
 
 ### Hermes Home Directory
 
-Default: `~/.hermes/` (override with `HERMES_HOME` env var or `--hermes-home` / `--profile` CLI flags).
+Default: `~/.hermez/` (override with `HERMES_HOME` env var or `--hermez-home` / `--profile` CLI flags).
 
 ```
-~/.hermes/
+~/.hermez/
 ├── config.yaml              # Main YAML config
 ├── .env                     # API keys (dotenv format)
 ├── sessions.db              # SQLite database (WAL + FTS5)
@@ -286,11 +286,11 @@ terminal:
 
 ## Security Considerations
 
-1. **PII Redaction:** The gateway hashes sender IDs and chat IDs before storing sessions. `hermes-core::redact` strips sensitive text from logs.
+1. **PII Redaction:** The gateway hashes sender IDs and chat IDs before storing sessions. `hermez-core::redact` strips sensitive text from logs.
 2. **Dangerous Command Approval:** Terminal and code-execution tools require user approval. A permanent allowlist is stored on disk and loaded at startup.
 3. **Path Security:** File operation tools validate paths against escape attempts (symlinks, parent-directory traversal).
 4. **Credential Pool:** API keys are rotated automatically on 401/402/429 errors. The pool supports multiple keys per provider.
-5. **Injection Sanitization:** `hermes-prompt::injection_scan` scans context content for prompt-injection patterns before sending to the LLM.
+5. **Injection Sanitization:** `hermez-prompt::injection_scan` scans context content for prompt-injection patterns before sending to the LLM.
 6. **Subagent Isolation:** Subagents run with a restricted tool subset (5 blocked tools: terminal, code_exec, browser, etc.) and independent budget.
 
 ---
@@ -306,16 +306,16 @@ terminal:
 
 ## Porting Notes (Python → Rust)
 
-> **Key context:** This repository (`hermez-ai`) is the Rust rewrite of the original Python implementation located at **`../hermes-agent`** (relative to this workspace). When cross-referencing behavior or looking up original logic, refer to that sibling directory.
+> **Key context:** This repository (`hermez-ai`) is the Rust rewrite of the original Python implementation located at **`../hermez-agent`** (relative to this workspace). When cross-referencing behavior or looking up original logic, refer to that sibling directory.
 
 This codebase is an active port from a Python implementation. Many module doc comments reference the original Python files:
-- `run_agent.py:AIAgent` → `hermes-agent-engine/src/agent.rs:AIAgent`
-- `config.py:load_config` → `hermes-core/src/config.rs:HermesConfig::load`
-- `toolsets.py` → `hermes-tools/src/toolsets_def.rs`
-- `model_tools.py` → `hermes-tools/src/*.rs` (~60 files)
-- `hermes_state.py` → `hermes-state/src/session_db.rs:SessionDB`
-- `gateway/run.py` → `hermes-gateway/src/runner.rs`
-- `acp_adapter/` → `src/hermes_acp/`
+- `run_agent.py:AIAgent` → `hermez-agent-engine/src/agent.rs:AIAgent`
+- `config.py:load_config` → `hermez-core/src/config.rs:HermesConfig::load`
+- `toolsets.py` → `hermez-tools/src/toolsets_def.rs`
+- `model_tools.py` → `hermez-tools/src/*.rs` (~60 files)
+- `hermez_state.py` → `hermez-state/src/session_db.rs:SessionDB`
+- `gateway/run.py` → `hermez-gateway/src/runner.rs`
+- `acp_adapter/` → `src/hermez_acp/`
 
 When in doubt about intended behavior, check the Python → Rust module mapping table in `docs/ARCHITECTURE.md` §8.
 
@@ -325,7 +325,7 @@ When in doubt about intended behavior, check the Python → Rust module mapping 
 
 Some crates use feature flags to gate heavy or optional dependencies:
 
-- `hermes-tools` features: `docker`, `mcp`, `browser`, `image` (all enabled by default)
+- `hermez-tools` features: `docker`, `mcp`, `browser`, `image` (all enabled by default)
 - Conditional modules use `#[cfg(feature = "...")]` (e.g., `browser`, `mcp_client`, `image_gen`)
 
 ---

@@ -1,4 +1,4 @@
-# Hermes Agent CLI 使用文档
+# Hermez Agent CLI 使用文档
 
 > 由 Nous Research 构建的自进化 AI Agent
 
@@ -17,7 +17,7 @@ hermes --version
 ### 从源码构建
 
 ```bash
-cd hermes-rs
+cd hermez-rs
 cargo build --release
 # 二进制位于 target/release/hermes (Linux/macOS) 或 hermes.exe (Windows)
 ```
@@ -39,8 +39,8 @@ hermes setup
 - 配置工具集
 
 配置文件存储在：
-- `~/.hermes/config.yaml` — 设置
-- `~/.hermes/.env` — API 密钥
+- `~/.hermez/config.yaml` — 设置
+- `~/.hermez/.env` — API 密钥
 
 ### 2. 开始对话
 
@@ -198,7 +198,7 @@ hermes profiles create <name>
 hermes profiles use <name>
 ```
 
-所有命令都支持 `--hermes-home <path>` 临时指定数据目录。
+所有命令都支持 `--hermez-home <path>` 临时指定数据目录。
 
 ### models — 列出可用模型
 
@@ -413,7 +413,7 @@ hermes claw migrate --source /path/to/.openclaw
 hermes claw cleanup
 ```
 
-注意：OpenClaw 迁移依赖 Python 3.11+ 和 `openclaw_to_hermes.py` 脚本。
+注意：OpenClaw 迁移依赖 Python 3.11+ 和 `openclaw_to_hermez.py` 脚本。
 
 ### batch — 批量处理
 
@@ -491,7 +491,7 @@ hermes doctor --fix         # 自动修复发现的问题
 
 ### 配置文件结构
 
-`~/.hermes/config.yaml`:
+`~/.hermez/config.yaml`:
 
 ```yaml
 agent:
@@ -517,11 +517,11 @@ terminal:
 每个 profile 有独立的数据目录：
 
 ```bash
-hermes --hermes-home ~/.hermes-dev setup
-hermes --hermes-home ~/.hermes-dev chat
+hermes --hermez-home ~/.hermez-dev setup
+hermes --hermez-home ~/.hermez-dev chat
 
-hermes --hermes-home ~/.hermes-prod setup
-hermes --hermes-home ~/.hermes-prod chat
+hermes --hermez-home ~/.hermez-prod setup
+hermes --hermez-home ~/.hermez-prod chat
 ```
 
 ---
@@ -562,7 +562,7 @@ hermes gateway run --platform telegram
 ## 数据目录结构
 
 ```
-~/.hermes/
+~/.hermez/
 ├── config.yaml              # 主配置
 ├── .env                     # API 密钥
 ├── sessions.db              # SQLite 会话数据库 (含 FTS5 搜索)

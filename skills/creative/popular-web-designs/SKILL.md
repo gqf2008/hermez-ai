@@ -6,7 +6,7 @@ description: >
   Vercel, Notion, Airbnb, and more. Each template includes colors, typography, components,
   layout rules, and ready-to-use CSS values.
 version: 1.0.0
-author: Hermes Agent + Teknium (design systems sourced from VoltAgent/awesome-design-md)
+author: Hermez Agent + Teknium (design systems sourced from VoltAgent/awesome-design-md)
 license: MIT
 tags: [design, css, html, ui, web-development, design-systems, templates]
 triggers:

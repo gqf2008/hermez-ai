@@ -1,4 +1,4 @@
-# hermes-rs Comprehensive Code Review
+# hermez-rs Comprehensive Code Review
 
 > Generated: 2026-04-18  
 > Workspace: 13 crates, ~124K lines, 3 binaries  
@@ -43,7 +43,7 @@ All items below were identified in the initial review, fixed, and verified.
 
 | File | Issue | Fix |
 |------|-------|-----|
-| `hermes-acp/src/lib.rs` | `serde_json::to_vec(...).unwrap()` — ACP server crash on serialization error | `match` with hard-coded error frame fallback |
+| `hermez-acp/src/lib.rs` | `serde_json::to_vec(...).unwrap()` — ACP server crash on serialization error | `match` with hard-coded error frame fallback |
 | `api_server.rs` | `json_data(...).unwrap()` — SSE stream crash on serialization | `unwrap_or_else` with error event |
 | `browser/mod.rs` | `Runtime::new().expect(...)` — panic if no runtime | `Handle::try_current()` helper |
 | Gateway adapters | `reqwest::Client::builder().build().expect(...)` | Graceful fallback |
@@ -71,10 +71,10 @@ All items below were identified in the initial review, fixed, and verified.
 
 There are **two divergent ACP implementations**:
 
-1. `crates/hermes-acp/src/lib.rs` — crate-level skeleton (~1,540 lines), sync stub, unimplemented prompt handler
-2. `src/hermes_acp/server.rs` — binary implementation (~940 lines), real async agent wiring via `AIAgent`
+1. `crates/hermez-acp/src/lib.rs` — crate-level skeleton (~1,540 lines), sync stub, unimplemented prompt handler
+2. `src/hermez_acp/server.rs` — binary implementation (~940 lines), real async agent wiring via `AIAgent`
 
-The CLI `hermes acp run` delegates to the **binary**, which does **NOT** depend on the `hermes-acp` crate. The crate is essentially dead code.
+The CLI `hermes acp run` delegates to the **binary**, which does **NOT** depend on the `hermez-acp` crate. The crate is essentially dead code.
 
 **Recommendation**: Unify under one implementation. Either:
 - Move the binary implementation into the crate and make the binary a thin wrapper, OR
@@ -83,7 +83,7 @@ The CLI `hermes acp run` delegates to the **binary**, which does **NOT** depend 
 ### 2.2 `src/main.rs` Bloat — **High Priority**
 
 - **1,900 lines**, 68% of which are `clap` schema definitions and argument structs.
-- All 3 binaries (`hermes`, `hermes-agent`, `hermes-acp`) live in `src/` subdirectories, but the root package is **NOT** in the workspace `members` list — `cargo build --release` at the workspace root only builds libraries, not binaries.
+- All 3 binaries (`hermez`, `hermez-agent`, `hermez-acp`) live in `src/` subdirectories, but the root package is **NOT** in the workspace `members` list — `cargo build --release` at the workspace root only builds libraries, not binaries.
 
 **Recommendation**: 
 - Extract `src/commands/` module to hold command dispatch logic.
@@ -93,14 +93,14 @@ The CLI `hermes acp run` delegates to the **binary**, which does **NOT** depend 
 
 | Crate | `pub mod` Count | Severity | Key Problem |
 |-------|-----------------|----------|-------------|
-| `hermes-cli` | 45 | **Critical** | Binary crate exposing all command modules — no external consumers |
-| `hermes-tools` | 55 | **Critical** | ~50 tool impl modules public; only `registry` should be public |
-| `hermes-llm` | 18 | Warning | Provider adapters (`anthropic`, `bedrock`, `codex`) public but unused externally |
-| `hermes-agent-engine` | 15 | Warning | Internal modules (`budget`, `failover`, `review_agent`) public |
-| `hermes-gateway` | 7 | Warning | `platforms` exposes 12 adapter modules |
-| `hermes-core` | 11 | Warning | Internal utilities (`auth_lock`, `env_loader`, `proxy_validation`) public |
+| `hermez-cli` | 45 | **Critical** | Binary crate exposing all command modules — no external consumers |
+| `hermez-tools` | 55 | **Critical** | ~50 tool impl modules public; only `registry` should be public |
+| `hermez-llm` | 18 | Warning | Provider adapters (`anthropic`, `bedrock`, `codex`) public but unused externally |
+| `hermez-agent-engine` | 15 | Warning | Internal modules (`budget`, `failover`, `review_agent`) public |
+| `hermez-gateway` | 7 | Warning | `platforms` exposes 12 adapter modules |
+| `hermez-core` | 11 | Warning | Internal utilities (`auth_lock`, `env_loader`, `proxy_validation`) public |
 
-**Impact**: Compilation times, binary size (dead code elimination can't remove unused `pub` items), API confusion (multiple paths to same item: `hermes_core::auth_lock::with_auth_json_read_lock` vs `hermes_core::with_auth_json_read_lock`).
+**Impact**: Compilation times, binary size (dead code elimination can't remove unused `pub` items), API confusion (multiple paths to same item: `hermez_core::auth_lock::with_auth_json_read_lock` vs `hermez_core::with_auth_json_read_lock`).
 
 **Recommendation**: Change all non-essential `pub mod` to `pub(crate) mod`. Estimated reduction: ~120 `pub mod` → ~25.
 
@@ -137,7 +137,7 @@ While not all are in hot paths, this density (~10 per 1,000 lines) is high for p
 
 | Dependency | Root `Cargo.toml` | Crate using different version |
 |------------|-------------------|------------------------------|
-| `rand` | `0.9` | `hermes-llm` uses `0.8`, `hermes-state` uses `0.8` |
+| `rand` | `0.9` | `hermez-llm` uses `0.8`, `hermez-state` uses `0.8` |
 
 **Impact**: Workspace compiles **two versions** of `rand` (0.8 and 0.9). `fastrand` (2.0) is also present. This bloats binary size and compile times.
 
@@ -145,7 +145,7 @@ While not all are in hot paths, this density (~10 per 1,000 lines) is high for p
 
 ### 2.7 Unused Root Dependencies
 
-The root `Cargo.toml` (the binary package, not workspace) declares direct dependencies that are **only** used by `src/hermes_acp/server.rs`:
+The root `Cargo.toml` (the binary package, not workspace) declares direct dependencies that are **only** used by `src/hermez_acp/server.rs`:
 
 - `uuid`
 - `parking_lot`
@@ -153,19 +153,19 @@ The root `Cargo.toml` (the binary package, not workspace) declares direct depend
 - `serde`
 - `serde_json`
 
-These should be moved to the `hermes-acp` binary's own dependency section or removed if the crate is deleted.
+These should be moved to the `hermez-acp` binary's own dependency section or removed if the crate is deleted.
 
 ### 2.8 Feature Flags — **None Exist**
 
 The workspace has **zero** feature flags. This means:
-- `hermes-agent` binary includes gateway, batch, cron, MCP, Docker, image generation code
+- `hermez-agent` binary includes gateway, batch, cron, MCP, Docker, image generation code
 - Every tool backend is compiled even if never used
 - Binary size is unnecessarily large
 
 **Recommended feature flags:**
-- `hermes-cli`: `gateway`, `batch`, `cron`
-- `hermes-tools`: `docker`, `mcp`, `image`, `browser`, `voice`
-- `hermes-gateway`: individual platform adapters (`telegram`, `discord`, `slack`, etc.)
+- `hermez-cli`: `gateway`, `batch`, `cron`
+- `hermez-tools`: `docker`, `mcp`, `image`, `browser`, `voice`
+- `hermez-gateway`: individual platform adapters (`telegram`, `discord`, `slack`, etc.)
 
 ### 2.9 `unsafe` Blocks — 11 occurrences
 
@@ -199,12 +199,12 @@ These are acknowledged gaps, not bugs:
 
 | Crate | Doc comments (`///`) | Lines of code | Ratio |
 |-------|----------------------|---------------|-------|
-| `hermes-core` | 327 | ~3,500 | 9.3% |
-| `hermes-llm` | 1,210 | ~22,000 | 5.5% |
-| `hermes-tools` | 1,689 | ~35,000 | 4.8% |
-| `hermes-agent-engine` | 881 | ~18,000 | 4.9% |
-| `hermes-gateway` | 933 | ~20,000 | 4.7% |
-| `hermes-cli` | 665 | ~15,000 | 4.4% |
+| `hermez-core` | 327 | ~3,500 | 9.3% |
+| `hermez-llm` | 1,210 | ~22,000 | 5.5% |
+| `hermez-tools` | 1,689 | ~35,000 | 4.8% |
+| `hermez-agent-engine` | 881 | ~18,000 | 4.9% |
+| `hermez-gateway` | 933 | ~20,000 | 4.7% |
+| `hermez-cli` | 665 | ~15,000 | 4.4% |
 
 **Assessment**: Doc comment density is moderate. Key public APIs (`AIAgent`, `MessageLoop`, `registry`) are documented. Internal modules often lack docs.
 
@@ -213,7 +213,7 @@ These are acknowledged gaps, not bugs:
 - ~2,039 tests passing
 - No coverage tooling configured (`cargo-tarpaulin` or `llvm-cov`)
 - Some tests are integration-style (spawn subcommands, test CLI flows)
-- Test isolation via `_isolate_hermes_home` autouse fixture (redirects `HERMES_HOME` to temp dir)
+- Test isolation via `_isolate_hermez_home` autouse fixture (redirects `HERMES_HOME` to temp dir)
 
 ### Clippy
 
@@ -227,15 +227,15 @@ These are acknowledged gaps, not bugs:
 
 ### P0 — Do Next (Blocks Production Readiness)
 
-1. **Resolve ACP dual implementation** — Unify `crates/hermes-acp` and `src/hermes_acp/`
+1. **Resolve ACP dual implementation** — Unify `crates/hermez-acp` and `src/hermez_acp/`
 2. **Reduce `unwrap`/`expect` in async paths** — Target: tool argument parsing, request handlers, channel receivers
 3. **Fix `rand` version drift** — Align all crates on single version
 
 ### P1 — Important (Significant Quality Improvement)
 
-4. **Tighten public API surfaces** — Change ~95 `pub mod` to `pub(crate) mod` across `hermes-cli`, `hermes-tools`, `hermes-gateway`, `hermes-llm`
+4. **Tighten public API surfaces** — Change ~95 `pub mod` to `pub(crate) mod` across `hermez-cli`, `hermez-tools`, `hermez-gateway`, `hermez-llm`
 5. **Modularize `src/main.rs`** — Extract commands into `src/commands/`
-6. **Add feature flags** — Start with `hermes-tools` (docker, mcp, image, browser)
+6. **Add feature flags** — Start with `hermez-tools` (docker, mcp, image, browser)
 7. **Cache hot-path clones** — `Arc<str>` for system prompt, `Arc<Value>` for messages, `LazyLock<Regex>` for file search
 
 ### P2 — Nice to Have

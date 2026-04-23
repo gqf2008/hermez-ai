@@ -1,0 +1,28 @@
+[package]
+name = "hermez-rl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+hermez-core.workspace = true
+hermez-llm.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+regex.workspace = true
+url.workspace = true
+uuid.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+urlencoding.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

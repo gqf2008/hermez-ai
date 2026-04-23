@@ -7,7 +7,7 @@ license: MIT
 metadata:
   hermes:
     tags: [TouchDesigner, MCP, twozero, creative-coding, real-time-visuals, generative-art, audio-reactive, VJ, installation, GLSL]
-    related_skills: [native-mcp, ascii-video, manim-video, hermes-video]
+    related_skills: [native-mcp, ascii-video, manim-video, hermez-video]
 
 ---
 
@@ -24,7 +24,7 @@ metadata:
 ## Architecture
 
 ```
-Hermes Agent -> MCP (Streamable HTTP) -> twozero.tox (port 40404) -> TD Python
+Hermez Agent -> MCP (Streamable HTTP) -> twozero.tox (port 40404) -> TD Python
 ```
 
 36 native tools. Free plugin (no payment/license — confirmed April 2026).

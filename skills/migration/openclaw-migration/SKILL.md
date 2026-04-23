@@ -1,18 +1,18 @@
 ---
 name: openclaw-migration
-description: Migrate a user's OpenClaw customization footprint into Hermes Agent. Imports Hermes-compatible memories, SOUL.md, command allowlists, user skills, and selected workspace assets from ~/.openclaw, then reports exactly what could not be migrated and why.
+description: Migrate a user's OpenClaw customization footprint into Hermez Agent. Imports Hermes-compatible memories, SOUL.md, command allowlists, user skills, and selected workspace assets from ~/.openclaw, then reports exactly what could not be migrated and why.
 version: 1.0.0
-author: Hermes Agent (Nous Research)
+author: Hermez Agent (Nous Research)
 license: MIT
 metadata:
   hermes:
     tags: [Migration, OpenClaw, Hermes, Memory, Persona, Import]
-    related_skills: [hermes-agent]
+    related_skills: [hermez-agent]
 ---
 
 # OpenClaw -> Hermes Migration
 
-Use this skill when a user wants to move their OpenClaw setup into Hermes Agent with minimal manual cleanup.
+Use this skill when a user wants to move their OpenClaw setup into Hermez Agent with minimal manual cleanup.
 
 ## CLI Command
 
@@ -32,15 +32,15 @@ The CLI command runs the same migration script described below. Use this skill (
 
 ## What this skill does
 
-It uses `scripts/openclaw_to_hermes.py` to:
+It uses `scripts/openclaw_to_hermez.py` to:
 
 - import `SOUL.md` into the Hermes home directory as `SOUL.md`
 - transform OpenClaw `MEMORY.md` and `USER.md` into Hermes memory entries
 - merge OpenClaw command approval patterns into Hermes `command_allowlist`
 - migrate Hermes-compatible messaging settings such as `TELEGRAM_ALLOWED_USERS` and `MESSAGING_CWD`
-- copy OpenClaw skills into `~/.hermes/skills/openclaw-imports/`
+- copy OpenClaw skills into `~/.hermez/skills/openclaw-imports/`
 - optionally copy the OpenClaw workspace instructions file into a chosen Hermes workspace
-- mirror compatible workspace assets such as `workspace/tts/` into `~/.hermes/tts/`
+- mirror compatible workspace assets such as `workspace/tts/` into `~/.hermez/tts/`
 - archive non-secret docs that do not have a direct Hermes destination
 - produce a structured report listing migrated items, conflicts, skipped items, and reasons
 
@@ -48,17 +48,17 @@ It uses `scripts/openclaw_to_hermes.py` to:
 
 The helper script lives in this skill directory at:
 
-- `scripts/openclaw_to_hermes.py`
+- `scripts/openclaw_to_hermez.py`
 
 When this skill is installed from the Skills Hub, the normal location is:
 
-- `~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py`
+- `~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py`
 
-Do not guess a shorter path like `~/.hermes/skills/openclaw-migration/...`.
+Do not guess a shorter path like `~/.hermez/skills/openclaw-migration/...`.
 
 Before running the helper:
 
-1. Prefer the installed path under `~/.hermes/skills/migration/openclaw-migration/`.
+1. Prefer the installed path under `~/.hermez/skills/migration/openclaw-migration/`.
 2. If that path fails, inspect the installed skill directory and resolve the script relative to the installed `SKILL.md`.
 3. Only use `find` as a fallback if the installed location is missing or the skill was moved manually.
 4. When calling the terminal tool, do not pass `workdir: "~"`. Use an absolute directory such as the user's home directory, or omit `workdir` entirely.
@@ -228,37 +228,37 @@ The helper script still supports category-level `--include` / `--exclude`, but t
 Dry run with full discovery:
 
 ```bash
-python3 ~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py
+python3 ~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py
 ```
 
 When using the terminal tool, prefer an absolute invocation pattern such as:
 
 ```json
-{"command":"python3 /home/USER/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py","workdir":"/home/USER"}
+{"command":"python3 /home/USER/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py","workdir":"/home/USER"}
 ```
 
 Dry run with the user-data preset:
 
 ```bash
-python3 ~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py --preset user-data
+python3 ~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py --preset user-data
 ```
 
 Execute a user-data migration:
 
 ```bash
-python3 ~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py --execute --preset user-data --skill-conflict skip
+python3 ~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py --execute --preset user-data --skill-conflict skip
 ```
 
 Execute a full compatible migration:
 
 ```bash
-python3 ~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py --execute --preset full --migrate-secrets --skill-conflict skip
+python3 ~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py --execute --preset full --migrate-secrets --skill-conflict skip
 ```
 
 Execute with workspace instructions included:
 
 ```bash
-python3 ~/.hermes/skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py --execute --preset user-data --skill-conflict rename --workspace-target "/absolute/workspace/path"
+python3 ~/.hermez/skills/migration/openclaw-migration/scripts/openclaw_to_hermez.py --execute --preset user-data --skill-conflict rename --workspace-target "/absolute/workspace/path"
 ```
 
 Do not use `$PWD` or the home directory as the workspace target by default. Ask for an explicit workspace path first.
@@ -293,5 +293,5 @@ After a successful run, the user should have:
 
 - Hermes persona state imported
 - Hermes memory files populated with converted OpenClaw knowledge
-- OpenClaw skills available under `~/.hermes/skills/openclaw-imports/`
+- OpenClaw skills available under `~/.hermez/skills/openclaw-imports/`
 - a migration report showing any conflicts, omissions, or unsupported data

@@ -1,6 +1,6 @@
-# Hermes Agent Python → Rust 移植完成度评估
+# Hermez Agent Python → Rust 移植完成度评估
 
-> 评估基准：原项目 `../hermes-agent`（Python） vs 当前 Rust workspace `hermez-ai`
+> 评估基准：原项目 `../hermez-agent`（Python） vs 当前 Rust workspace `hermez-ai`
 > 评估时间：2026-04-21
 
 ---
@@ -12,7 +12,7 @@
 | **业务代码** | 242,343 行 | 156,880 行 | ~65% 体量对齐 |
 | **测试代码** | 214,475 行（611 文件） | ~22,500 行（2317 测试函数，33 集成测试文件） | ~10% ⚠️ |
 | **Workspace crates** | — | 12 crates | — |
-| **Binary targets** | 2 (cli + gateway) | 3 (hermes + hermes-agent + hermes-acp) | ✅ |
+| **Binary targets** | 2 (cli + gateway) | 3 (hermes + hermez-agent + hermez-acp) | ✅ |
 | **编译状态** | — | `cargo build --release` 通过 | ✅ |
 
 > **加权综合完成度：约 65–70%**
@@ -30,7 +30,7 @@
 
 | Python 原文件 | Rust 对应 | 行数对比 | 状态 |
 |--------------|-----------|---------|------|
-| `run_agent.py` (12,113 行) | `hermes-agent-engine/src/` (12,700 行) | +587 | ✅ 已移植 |
+| `run_agent.py` (12,113 行) | `hermez-agent-engine/src/` (12,700 行) | +587 | ✅ 已移植 |
 | `agent/memory_manager.py` | `memory_manager.rs` | — | ✅ 已移植 |
 | `agent/memory_provider.py` | `memory_provider.rs` | — | ✅ Trait 定义 |
 | `agent/subagent.py` | `subagent.rs` | — | ✅ 已移植 |
@@ -50,18 +50,18 @@
 
 | Python 原文件 | Rust 对应 | 状态 |
 |--------------|-----------|------|
-| `agent/anthropic_adapter.py` | `hermes-llm/src/anthropic.rs` | ✅ |
-| `agent/bedrock_adapter.py` | `hermes-llm/src/bedrock.rs` | ✅ |
-| `agent/credential_pool.py` | `hermes-llm/src/credential_pool.rs` | ✅ |
-| `agent/error_classifier.py` | `hermes-llm/src/error_classifier.rs` | ✅ |
-| `agent/model_metadata.py` | `hermes-llm/src/model_metadata.rs` | ✅ |
-| `agent/models_dev.py` | `hermes-llm/src/models_dev.rs` | ✅ |
-| `agent/nous_rate_guard.py` | `hermes-llm/src/rate_limit.rs` | ✅ |
-| `agent/retry_utils.py` | `hermes-llm/src/retry.rs` | ✅ |
-| `agent/auxiliary_client.py` | `hermes-llm/src/auxiliary_client.rs` | ✅ |
-| `_extract_reasoning` | `hermes-llm/src/reasoning.rs` | ✅ 4 formats |
-| Tool call parsers | `hermes-llm/src/tool_call/*.rs` | ✅ 10 parsers |
-| `agent/copilot_acp_client.py` | `hermes-llm/src/copilot_acp_client.rs` | ✅ |
+| `agent/anthropic_adapter.py` | `hermez-llm/src/anthropic.rs` | ✅ |
+| `agent/bedrock_adapter.py` | `hermez-llm/src/bedrock.rs` | ✅ |
+| `agent/credential_pool.py` | `hermez-llm/src/credential_pool.rs` | ✅ |
+| `agent/error_classifier.py` | `hermez-llm/src/error_classifier.rs` | ✅ |
+| `agent/model_metadata.py` | `hermez-llm/src/model_metadata.rs` | ✅ |
+| `agent/models_dev.py` | `hermez-llm/src/models_dev.rs` | ✅ |
+| `agent/nous_rate_guard.py` | `hermez-llm/src/rate_limit.rs` | ✅ |
+| `agent/retry_utils.py` | `hermez-llm/src/retry.rs` | ✅ |
+| `agent/auxiliary_client.py` | `hermez-llm/src/auxiliary_client.rs` | ✅ |
+| `_extract_reasoning` | `hermez-llm/src/reasoning.rs` | ✅ 4 formats |
+| Tool call parsers | `hermez-llm/src/tool_call/*.rs` | ✅ 10 parsers |
+| `agent/copilot_acp_client.py` | `hermez-llm/src/copilot_acp_client.rs` | ✅ |
 | `agent/google_code_assist.py` | (部分并入 provider) | ⚠️ 需确认 |
 
 **Provider 数量**：Python 原项目 11 个 → Rust 11 个（Anthropic, OpenAI, OpenRouter, Gemini, Codex, Kimi, Minimax, Z.ai, Nous, Bedrock, Custom）
@@ -72,21 +72,21 @@
 
 | Python 原文件 | Rust 对应 | 状态 |
 |--------------|-----------|------|
-| `agent/prompt_builder.py` | `hermes-prompt/src/builder.rs` | ✅ + cache control |
-| `agent/context_compressor.py` | `hermes-prompt/src/context_compressor.rs` | ✅ 4-stage |
-| `agent/context_engine.py` | `hermes-prompt/src/context_engine.rs` | ✅ |
-| `agent/context_references.py` | `hermes-prompt/src/context_references.rs` | ✅ |
-| `agent/manual_compression_feedback.py` | `hermes-prompt/src/manual_compression_feedback.rs` | ✅ |
-| `agent/subdirectory_hints.py` | `hermes-prompt/src/subdirectory_hints.rs` | ✅ |
-| `agent/prompt_caching.py` | `hermes-prompt/src/cache_control.rs` | ✅ |
-| `agent/redact.py` | `hermes-core/src/redact.rs` | ✅ |
-| `trajectory_compressor.py` | `hermes-compress/src/` | ✅ |
+| `agent/prompt_builder.py` | `hermez-prompt/src/builder.rs` | ✅ + cache control |
+| `agent/context_compressor.py` | `hermez-prompt/src/context_compressor.rs` | ✅ 4-stage |
+| `agent/context_engine.py` | `hermez-prompt/src/context_engine.rs` | ✅ |
+| `agent/context_references.py` | `hermez-prompt/src/context_references.rs` | ✅ |
+| `agent/manual_compression_feedback.py` | `hermez-prompt/src/manual_compression_feedback.rs` | ✅ |
+| `agent/subdirectory_hints.py` | `hermez-prompt/src/subdirectory_hints.rs` | ✅ |
+| `agent/prompt_caching.py` | `hermez-prompt/src/cache_control.rs` | ✅ |
+| `agent/redact.py` | `hermez-core/src/redact.rs` | ✅ |
+| `trajectory_compressor.py` | `hermez-compress/src/` | ✅ |
 
 ---
 
 ### 2.4 Tools（~60 个工具模块）
 
-| Python `tools/` (40,535 行) | Rust `hermes-tools/src/` (38,111 行) | 状态 |
+| Python `tools/` (40,535 行) | Rust `hermez-tools/src/` (38,111 行) | 状态 |
 |----------------------------|--------------------------------------|------|
 | `file_tools.py` + `file_operations.py` | `file_ops.rs`, `shell_file_ops.rs` | ✅ |
 | `terminal_tool.py` | `terminal.rs` | ✅ |
@@ -128,7 +128,7 @@
 
 ### 2.5 Gateway（19+ 平台适配器）
 
-| Python `gateway/` (49,028 行) | Rust `hermes-gateway/src/` (39,217 行) | 状态 |
+| Python `gateway/` (49,028 行) | Rust `hermez-gateway/src/` (39,217 行) | 状态 |
 |------------------------------|----------------------------------------|------|
 | `gateway/run.py` | `runner.rs` | ✅ |
 | `gateway/session.py` | `session.rs` | ✅ |
@@ -158,7 +158,7 @@
 
 ### 2.6 CLI（31+ 子命令）
 
-| Python `cli.py` + `hermes_cli/` (~61K 行) | Rust `hermes-cli/src/` (21,599 行) | 状态 |
+| Python `cli.py` + `hermez_cli/` (~61K 行) | Rust `hermez-cli/src/` (21,599 行) | 状态 |
 |------------------------------------------|-------------------------------------|------|
 | 31+ subcommands | 31+ subcommands | ✅ 对齐 |
 | TUI / reedline | `tui/` (completers, curses, input, voice) | ✅ |
@@ -172,7 +172,7 @@
 | Web server | `web_server.rs` | ✅ |
 | Skin engine | `skin_engine.rs` | ✅ |
 
-> 注：Rust CLI 代码更紧凑（21K vs 61K），部分原因是原项目 hermes_cli/ 包含了很多 config/model/provider 相关的逻辑，这些在 Rust 中被下沉到了 core/llm 层。
+> 注：Rust CLI 代码更紧凑（21K vs 61K），部分原因是原项目 hermez_cli/ 包含了很多 config/model/provider 相关的逻辑，这些在 Rust 中被下沉到了 core/llm 层。
 
 ---
 
@@ -180,7 +180,7 @@
 
 | Python | Rust | 状态 |
 |--------|------|------|
-| `hermes_state.py` (1,293 行) | `hermes-state/src/` (2,490 行) | ✅ 对齐 + FTS5 |
+| `hermez_state.py` (1,293 行) | `hermez-state/src/` (2,490 行) | ✅ 对齐 + FTS5 |
 | SQLite schema | `schema.rs` + `models.rs` | ✅ |
 | Insights engine | `insights.rs` | ✅ |
 
@@ -190,15 +190,15 @@
 
 | Python | Rust | 状态 |
 |--------|------|------|
-| `batch_runner.py` | `hermes-batch/src/` | ✅ |
-| `trajectory_compressor.py` | `hermes-compress/src/` | ✅ |
-| `cron/jobs.py` + `scheduler.py` | `hermes-cron/src/` | ✅ |
-| `mcp_serve.py` | `hermes-tools/src/mcp_serve.rs` | ✅ |
-| `acp_adapter/` | `src/hermes_acp/` | ✅ 13 methods |
-| `rl_cli.py` + `mini_swe_runner.py` + `tinker-atropos` | `hermes-rl/src/` | ✅ 5 envs |
-| `hermes_constants.py` | `hermes-core/src/constants.rs` | ✅ |
-| `hermes_logging.py` | `hermes-core/src/logging.rs` | ✅ |
-| `config.py` | `hermes-core/src/config.rs` | ✅ + env expand |
+| `batch_runner.py` | `hermez-batch/src/` | ✅ |
+| `trajectory_compressor.py` | `hermez-compress/src/` | ✅ |
+| `cron/jobs.py` + `scheduler.py` | `hermez-cron/src/` | ✅ |
+| `mcp_serve.py` | `hermez-tools/src/mcp_serve.rs` | ✅ |
+| `acp_adapter/` | `src/hermez_acp/` | ✅ 13 methods |
+| `rl_cli.py` + `mini_swe_runner.py` + `tinker-atropos` | `hermez-rl/src/` | ✅ 5 envs |
+| `hermez_constants.py` | `hermez-core/src/constants.rs` | ✅ |
+| `hermez_logging.py` | `hermez-core/src/logging.rs` | ✅ |
+| `config.py` | `hermez-core/src/config.rs` | ✅ + env expand |
 
 ---
 
@@ -221,7 +221,7 @@
 
 | 模块 | 原项目规模 | 影响评估 |
 |------|-----------|---------|
-| **ui-tui** (React Ink CLI UI) | 229 文件 | 🔴 高 — 原项目有完整的 TUI 界面（hermes-ink），Rust 项目无对应 |
+| **ui-tui** (React Ink CLI UI) | 229 文件 | 🔴 高 — 原项目有完整的 TUI 界面（hermez-ink），Rust 项目无对应 |
 | **website** (Docusaurus 文档站) | 146 文件 | 🟡 中 — 面向用户的文档站，不影响运行时 |
 | **tinker-atropos** (RL 子模块) | 18 文件 | 🟡 中 — 独立 RL 训练环境，RL crate 已覆盖核心 |
 | **nix** (Nix flake 支持) | 8 文件 | `flake.nix` 已提供开发 Shell + 包构建 | 🟢 低 — 开发环境/部署 |
@@ -244,7 +244,7 @@
 
 - **原项目**：611 个测试文件，覆盖 agent 循环、gateway 平台适配、CLI 命令、tools 边界、压缩策略、安全沙箱等。
 - **Rust 项目**：12 个 crate 共 2,284 个单元测试 + 33 个集成测试，约 22,500 行测试代码。核心 crate（core/state/llm/tools/prompt）已基本覆盖，agent-engine/gateway/cli 次之。
-- **风险**：hermes-agent-engine 中 1 个 subagent 测试（`test_delegation_filters_blocked_toolsets`）已标记 `#[ignore]`，需 mock LLM 调用链才能快速回归；gateway 平台适配、CLI 端到端、安全沙箱的覆盖仍有缺口。
+- **风险**：hermez-agent-engine 中 1 个 subagent 测试（`test_delegation_filters_blocked_toolsets`）已标记 `#[ignore]`，需 mock LLM 调用链才能快速回归；gateway 平台适配、CLI 端到端、安全沙箱的覆盖仍有缺口。
 
 ### 5.2 文档站
 
@@ -262,7 +262,7 @@
 
 ```
 Tier 5 — Binary Targets          ████████████████████ 100% ✅
-  hermes / hermes-agent / hermes-acp 全部产出
+  hermes / hermez-agent / hermez-acp 全部产出
 
 Tier 4 — CLI / Adapter Layer     ██████████████████░░  90% ✅
   31 子命令 ✅ | Gateway 20 平台 ✅ | TUI 基本 ✅ | Web Dashboard 核心功能 ✅
@@ -308,7 +308,7 @@ Tier 0 — Core Layer              ███████████████
 
 1. **测试体系（P0）**
    - 当前 11 个集成测试 vs 原项目 611 个测试文件。
-   - 建议按 crate 逐步迁移高价值测试：先 `hermes-llm`（provider mock），再 `hermes-tools`（边界/安全），再 `hermes-gateway`（平台适配 mock）。
+   - 建议按 crate 逐步迁移高价值测试：先 `hermez-llm`（provider mock），再 `hermez-tools`（边界/安全），再 `hermez-gateway`（平台适配 mock）。
 
 2. **Web 前端（P1）**
    - `web/` 目前只有 417 行骨架，原项目有 7,301 行功能完整的 React 前端。

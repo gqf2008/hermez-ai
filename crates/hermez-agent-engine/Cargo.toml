@@ -1,0 +1,33 @@
+[package]
+name = "hermez-agent-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hermez-core.workspace = true
+anyhow.workspace = true
+hermez-llm.workspace = true
+hermez-tools.workspace = true
+hermez-prompt.workspace = true
+hermez-state.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+chrono.workspace = true
+walkdir.workspace = true
+serde_yaml.workspace = true
+shellexpand.workspace = true
+wasmtime = { version = "25", default-features = false, features = ["cranelift", "runtime", "component-model"] }
+wasmtime-wasi = "25"
+
+[dev-dependencies]
+tempfile.workspace = true
+mockito.workspace = true

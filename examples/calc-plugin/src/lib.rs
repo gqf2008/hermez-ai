@@ -1,4 +1,4 @@
-//! Hermes Calculator Plugin — evaluate mathematical expressions.
+//! Hermez Calculator Plugin — evaluate mathematical expressions.
 //!
 //! Provides a `calc` tool that evaluates arithmetic expressions
 //! with support for +, -, *, /, ^, parentheses, and common functions.
