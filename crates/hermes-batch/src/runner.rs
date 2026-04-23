@@ -382,7 +382,7 @@ async fn process_batch(
             conversations,
             timestamp: chrono::Utc::now().to_rfc3339(),
             model: config.model.clone(),
-            completed: turn_result.exit_reason == "completed",
+            completed: turn_result.exit_reason == hermes_agent_engine::agent::ExitReason::Completed,
             tool_stats: Some(serde_json::to_value(&tool_stats).unwrap_or_default()),
             reasoning_stats: Some(serde_json::to_value(&reasoning_stats).unwrap_or_default()),
             metadata: Some(serde_json::json!({

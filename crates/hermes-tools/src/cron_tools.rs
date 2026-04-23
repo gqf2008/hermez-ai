@@ -16,6 +16,27 @@ use hermes_core::HermesConfig;
 
 use crate::registry::{tool_error, ToolRegistry};
 
+/// Parse the `deliver` argument from a JSON value.
+///
+/// Supports string form (`"feishu:chat_id"`) or object form
+/// (`{"platform": "feishu", "chat_id": "xxx"}`).
+fn parse_deliver_arg(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        Some(s.to_string())
+    } else {
+        value
+            .get("platform")
+            .and_then(|x| x.as_str())
+            .map(|p| {
+                format!(
+                    "{}:{}",
+                    p,
+                    value.get("chat_id").and_then(|x| x.as_str()).unwrap_or("")
+                )
+            })
+    }
+}
+
 /// Cron job record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CronJob {
@@ -353,21 +374,7 @@ fn handle_create(args: &Value) -> Result<String, hermes_core::HermesError> {
         }
     });
 
-    let deliver = args.get("deliver").and_then(|v| {
-        if let Some(s) = v.as_str() {
-            Some(s.to_string())
-        } else {
-            v.get("platform")
-                .and_then(|x| x.as_str())
-                .map(|p| {
-                    format!(
-                        "{}:{}",
-                        p,
-                        v.get("chat_id").and_then(|x| x.as_str()).unwrap_or("")
-                    )
-                })
-        }
-    });
+    let deliver = args.get("deliver").and_then(parse_deliver_arg);
 
     let model = args.get("model").map(|v| ModelConfig {
         provider: v.get("provider").and_then(|x| x.as_str()).map(String::from),
@@ -518,20 +525,7 @@ fn handle_update(args: &Value) -> Result<String, hermes_core::HermesError> {
         job.enabled = enabled;
     }
     if let Some(deliver) = args.get("deliver") {
-        job.deliver = if let Some(s) = deliver.as_str() {
-            Some(s.to_string())
-        } else {
-            deliver
-                .get("platform")
-                .and_then(|x| x.as_str())
-                .map(|p| {
-                    format!(
-                        "{}:{}",
-                        p,
-                        deliver.get("chat_id").and_then(|x| x.as_str()).unwrap_or("")
-                    )
-                })
-        };
+        job.deliver = parse_deliver_arg(deliver);
     }
     if let Some(skills) = args.get("skills").and_then(Value::as_array) {
         job.skills = skills
@@ -729,7 +723,10 @@ pub fn register_cron_tools(registry: &mut ToolRegistry) {
                     },
                     "name": { "type": "string", "description": "Friendly name for the job." },
                     "repeat": { "type": "integer", "description": "Number of times to repeat (omit for infinite)." },
-                    "deliver": { "type": "object", "description": "Delivery target config: {platform, chat_id}." },
+                    "deliver": {
+                        "type": "object",
+                        "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or platform:chat_id for a specific destination. Examples: 'feishu:oc_123456', 'telegram:-1001234567890'."
+                    },
                     "skills": { "type": "array", "description": "List of skills to enable for this job.", "items": {"type": "string"} },
                     "model": { "type": "object", "description": "Model override: {provider, model}." },
                     "script": { "type": "string", "description": "Path to a script to run before the job (must be in ~/.hermes/scripts/)." },

@@ -11,6 +11,7 @@ use std::sync::atomic::AtomicBool;
 use hermes_agent_engine::agent::{AIAgent, AgentConfig, ApprovalHandler};
 use hermes_agent_engine::agent::types::Message;
 use hermes_core::{HermesConfig, Result};
+use hermes_prompt::ToolUseEnforcement;
 use hermes_tools::registry::ToolRegistry;
 use hermes_tools::register_all_tools;
 
@@ -853,9 +854,16 @@ impl HermesApp {
         }
 
         // Create and initialize runner
+        const GATEWAY_SYSTEM_MSG: &str = "You are a helpful assistant responding to user messages on a messaging platform (Feishu/Weixin/etc). Use your available tools when they can help the user.";
+
         let mut runner = GatewayRunner::new(GatewayConfig {
             platforms: gateway_config.platforms,
             default_model: gateway_config.default_model.clone(),
+            provider: gateway_config.provider.clone(),
+            base_url: gateway_config.base_url.clone(),
+            api_key: gateway_config.api_key.clone(),
+            api_mode: gateway_config.api_mode.clone(),
+            feishu_stream_mode: gateway_config.feishu_stream_mode,
         });
         runner.initialize();
 
@@ -872,6 +880,10 @@ impl HermesApp {
         let model_name = gateway_config.default_model.clone();
         let mut agent_registry = ToolRegistry::new();
         register_all_tools(&mut agent_registry);
+        // Remove check_dangerous_command for gateway mode — the terminal tool already
+        // has built-in approval checks, and exposing this as a separate tool causes
+        // LLMs to get stuck in check→recheck loops without ever executing anything.
+        agent_registry.deregister("check_dangerous_command");
 
         // Provider default model fallback for gateway
         let provider_str = model_name.split('/').next().unwrap_or("openrouter").to_lowercase();
@@ -890,8 +902,13 @@ impl HermesApp {
         let agent_config = AgentConfig {
             model: final_model.clone(),
             max_iterations: 90,
-            skip_context_files: false,
-            terminal_cwd: std::env::current_dir().ok(),
+            skip_context_files: true,
+            tool_use_enforcement: ToolUseEnforcement::Auto,
+            terminal_cwd: None,
+            provider: gateway_config.provider.clone(),
+            base_url: gateway_config.base_url.clone(),
+            api_key: gateway_config.api_key.clone(),
+            api_mode: gateway_config.api_mode.clone(),
             ..AgentConfig::default()
         };
 
@@ -971,6 +988,8 @@ impl HermesApp {
             registry: hermes_gateway::runner::ApprovalRegistry,
             slack_adapter: Option<Arc<hermes_gateway::platforms::slack::SlackAdapter>>,
             feishu_adapter: Option<Arc<hermes_gateway::platforms::feishu::FeishuAdapter>>,
+            /// Shared session database for loading/saving conversation history.
+            session_db: Arc<hermes_state::SessionDB>,
         }
 
         #[async_trait::async_trait]
@@ -989,6 +1008,24 @@ impl HermesApp {
                     agent.switch_model(model, None, None, None);
                 }
 
+                // --- Session persistence: bind this chat to a stable session_id ---
+                let session_id = format!("gateway_{}_{}", platform.as_str(), chat_id);
+                agent.set_session_context(&session_id, Some(self.session_db.clone()));
+
+                // Load conversation history from the session database.
+                let history: Vec<hermes_agent_engine::agent::types::Message> =
+                    match self.session_db.get_messages_as_conversation(&session_id) {
+                        Ok(msgs) => msgs.into_iter().map(Arc::new).collect(),
+                        Err(e) => {
+                            tracing::warn!("Failed to load session history for {session_id}: {e}");
+                            Vec::new()
+                        }
+                    };
+                tracing::debug!(
+                    "Loaded {} historical message(s) for session {session_id}",
+                    history.len()
+                );
+
                 // Wire up the per-turn approval handler so that dangerous
                 // terminal commands can block for user confirmation.
                 let approval_handler = AgentApprovalHandler {
@@ -1000,7 +1037,119 @@ impl HermesApp {
                 };
                 agent.set_approval_handler(Some(Arc::new(approval_handler)));
 
-                let turn_result = agent.run_conversation(content, None, None).await;
+                // Wire streaming callbacks for Feishu when stream_mode is enabled
+                let feishu_streaming = platform == hermes_gateway::config::Platform::Feishu
+                    && self.feishu_adapter.as_ref()
+                        .map(|a| a.config().stream_mode)
+                        .unwrap_or(false);
+
+                let mut flush_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+                if feishu_streaming {
+                    if let Some(adapter) = self.feishu_adapter.as_ref() {
+                        if adapter.start_stream_reply(chat_id).await.is_ok() {
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<
+                                hermes_gateway::platforms::feishu::FeishuStreamEvent,
+                            >(128);
+
+                            let chat_id_cb = chat_id.to_string();
+                            agent.set_stream_callback({
+                                let tx = tx.clone();
+                                let cid = chat_id_cb.clone();
+                                move |delta| {
+                                    if let Err(e) = tx.try_send(
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ContentDelta {
+                                            chat_id: cid.clone(),
+                                            delta: delta.to_string(),
+                                        },
+                                    ) {
+                                        tracing::debug!("Feishu stream content drop: {e}");
+                                    }
+                                }
+                            });
+                            agent.set_reasoning_stream_callback({
+                                let tx = tx.clone();
+                                let cid = chat_id_cb.clone();
+                                move |delta| {
+                                    if let Err(e) = tx.try_send(
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ReasoningDelta {
+                                            chat_id: cid.clone(),
+                                            delta: delta.to_string(),
+                                        },
+                                    ) {
+                                        tracing::debug!("Feishu stream reasoning drop: {e}");
+                                    }
+                                }
+                            });
+                            agent.set_tool_gen_started_callback({
+                                let tx = tx.clone();
+                                let cid = chat_id_cb.clone();
+                                move |name| {
+                                    if let Err(e) = tx.try_send(
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ToolStarted {
+                                            chat_id: cid.clone(),
+                                            tool_name: name.to_string(),
+                                        },
+                                    ) {
+                                        tracing::debug!("Feishu stream tool drop: {e}");
+                                    }
+                                }
+                            });
+
+                            let adapter_flush = adapter.clone();
+                            flush_handle = Some(tokio::spawn(async move {
+                                let interval = std::time::Duration::from_millis(800);
+                                let mut last_flush = std::time::Instant::now() - interval;
+                                while let Some(event) = rx.recv().await {
+                                    let chat_id = event.chat_id().to_string();
+                                    match event {
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ContentDelta { delta, .. } => {
+                                            adapter_flush.push_content_delta(&chat_id, &delta).await;
+                                        }
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ReasoningDelta { delta, .. } => {
+                                            adapter_flush.push_reasoning_delta(&chat_id, &delta).await;
+                                        }
+                                        hermes_gateway::platforms::feishu::FeishuStreamEvent::ToolStarted { tool_name, .. } => {
+                                            adapter_flush.push_tool_started(&chat_id, &tool_name).await;
+                                        }
+                                    }
+                                    if last_flush.elapsed() >= interval {
+                                        let _ = adapter_flush.flush_stream_edit(&chat_id).await;
+                                        last_flush = std::time::Instant::now();
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+
+                let turn_result = agent.run_conversation(content, Some(GATEWAY_SYSTEM_MSG), Some(&history)).await;
+
+                // Drop the agent (and its callback clones) so the channel closes.
+                drop(agent);
+
+                // Wait for flush task to drain and finish
+                if let Some(handle) = flush_handle {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+                }
+
+                // Finalize stream reply for Feishu
+                if feishu_streaming {
+                    if let Some(adapter) = self.feishu_adapter.as_ref() {
+                        let _ = adapter.flush_stream_edit(chat_id).await;
+                        if turn_result.response.is_empty() {
+                            let _ = adapter
+                                .finalize_stream_with_error(
+                                    chat_id,
+                                    "Sorry, I encountered an error processing your message.",
+                                )
+                                .await;
+                        } else {
+                            let _ = adapter.finalize_stream_reply(chat_id, &turn_result.response).await;
+                        }
+                    }
+                }
+
                 if turn_result.response.is_empty() {
                     Err("Agent returned no response".to_string())
                 } else {
@@ -1013,6 +1162,7 @@ impl HermesApp {
                             completion_tokens: u.completion_tokens,
                             total_tokens: u.total_tokens,
                         }),
+                        already_sent: feishu_streaming,
                     })
                 }
             }
@@ -1031,7 +1181,7 @@ impl HermesApp {
 
             async fn run_with_prompt(&self, prompt: &str) -> std::result::Result<String, String> {
                 let mut agent = self.agent.lock().await;
-                let turn_result = agent.run_conversation(prompt, None, None).await;
+                let turn_result = agent.run_conversation(prompt, Some(GATEWAY_SYSTEM_MSG), None).await;
                 if turn_result.response.is_empty() {
                     Err("Agent returned no response".to_string())
                 } else {
@@ -1040,12 +1190,23 @@ impl HermesApp {
             }
         }
 
+        // Open the shared session database for gateway persistence.
+        let session_db = match hermes_state::SessionDB::open_default() {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                tracing::warn!("Failed to open session database: {e}. Gateway will run without conversation persistence.");
+                let tmp_path = std::env::temp_dir().join(format!("hermes_session_{}.db", std::process::id()));
+                Arc::new(hermes_state::SessionDB::open(&tmp_path).expect("temp session DB should open"))
+            }
+        };
+
         rt.block_on(async {
             let handler = std::sync::Arc::new(AgentHandler {
                 agent: tokio::sync::Mutex::new(agent),
                 registry: runner.approval_registry(),
                 slack_adapter: runner.slack_adapter(),
                 feishu_adapter: runner.feishu_adapter(),
+                session_db,
             });
             runner.set_message_handler(handler).await;
             runner.run().await

@@ -1006,7 +1006,12 @@ pub fn handle_skills_categories(args: Value) -> Result<String, hermes_core::Herm
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let (fm, _) = parse_frontmatter(&content[..content.len().min(4000)]);
+            let preview = content
+                .char_indices()
+                .nth(4000)
+                .map(|(i, _)| &content[..i])
+                .unwrap_or(&content);
+            let (fm, _) = parse_frontmatter(preview);
 
             if !skill_matches_platform(&fm) {
                 continue;

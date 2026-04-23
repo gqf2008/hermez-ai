@@ -71,7 +71,7 @@ impl Default for WhatsAppConfig {
             session_path,
             reply_prefix: std::env::var("WHATSAPP_REPLY_PREFIX").ok(),
             require_mention: std::env::var("WHATSAPP_REQUIRE_MENTION")
-                .map(|v| v.to_lowercase() == "true" || v == "1")
+                .map(|v| hermes_core::coerce_bool(&v))
                 .unwrap_or(false),
             free_response_chats: std::env::var("WHATSAPP_FREE_RESPONSE_CHATS")
                 .unwrap_or_default()

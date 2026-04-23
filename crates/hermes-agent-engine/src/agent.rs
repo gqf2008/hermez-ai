@@ -24,8 +24,8 @@ pub mod control;
 
 // Re-export public types from sub-modules
 pub use types::{
-    ActivityCallback, AgentConfig, ApprovalHandler, FallbackProvider, InterimAssistantCallback,
-    PreLlmHook, PreLlmHookResult, PrimaryRuntime, ReasoningCallback,
+    ActivityCallback, AgentConfig, ApprovalHandler, ExitReason, FallbackProvider,
+    InterimAssistantCallback, PreLlmHook, PreLlmHookResult, PrimaryRuntime, ReasoningCallback,
     StatusCallback, StreamCallback, ToolGenCallback, TurnResult, TurnUsage,
 };
 
@@ -41,7 +41,7 @@ use crate::agent::types::Message;
 use hermes_core::{HermesConfig, Result};
 use hermes_prompt::{
     apply_anthropic_cache_control, build_system_prompt, CompressorConfig,
-    PromptBuilderConfig, ToolUseEnforcement, CacheTtl,
+    PromptBuilderConfig, CacheTtl,
 };
 use hermes_llm::reasoning::extract_reasoning;
 use hermes_tools::registry::ToolRegistry;
@@ -55,6 +55,10 @@ use crate::subagent::{SubagentManager, SubagentResult};
 // Re-export from sub-modules for use within this module
 use constants::*;
 use utils::*;
+
+/// Key for cross-iteration loop detection.
+#[derive(Eq, PartialEq, Hash, Clone)]
+struct ToolCallKey { name: String, args: String }
 
 /// AI Agent with tool calling capabilities.
 pub struct AIAgent {
@@ -265,6 +269,14 @@ impl AIAgent {
         self.approval_handler = handler;
     }
 
+    /// Set the session context (session_id + session_db) for this turn.
+    /// Used by the gateway to bind each chat to its own persistent session.
+    pub fn set_session_context(&mut self, session_id: &str, session_db: Option<Arc<hermes_state::SessionDB>>) {
+        self.config.session_id = Some(session_id.to_string());
+        self.session_db = session_db;
+        self.last_flushed_db_idx = 0;
+    }
+
     /// Invoke a lifecycle hook on all loaded WASM plugins.
     fn invoke_wasm_hooks(&self, hook_name: &str, context: &std::collections::HashMap<String, serde_json::Value>) {
         if self.wasm_plugins.is_empty() {
@@ -303,7 +315,7 @@ impl AIAgent {
             platform: self.config.platform.clone(),
             skip_context_files: self.config.skip_context_files,
             terminal_cwd: self.config.terminal_cwd.clone(),
-            tool_use_enforcement: ToolUseEnforcement::Auto,
+            tool_use_enforcement: self.config.tool_use_enforcement.clone(),
             available_tools: Some(available_tools),
         };
 
@@ -387,7 +399,7 @@ impl AIAgent {
         let mut final_response = String::new();
         // Exit reason — all branches in the loop set this before breaking.
         #[allow(unused_assignments)]
-        let mut exit_reason = "max_iterations".to_string();
+        let mut exit_reason = ExitReason::MaxIterations;
         let mut truncated_retry = false;
         let mut length_continue_retries: u32 = 0;
         let mut truncated_response_prefix = String::new();
@@ -398,6 +410,7 @@ impl AIAgent {
         // Compression exhaustion — set when max attempts reached without
         // resolving context overflow. Caller (gateway) should auto-reset.
         let mut compression_exhausted = false;
+        let mut tool_call_history: std::collections::HashMap<ToolCallKey, u32> = std::collections::HashMap::new();
 
         // Self-evolution: increment turn counter, check memory nudge threshold
         let mut should_review_memory = false;
@@ -423,14 +436,14 @@ impl AIAgent {
                 true
             } else {
                 // Budget exhausted, no grace call available
-                exit_reason = "budget_exhausted".to_string();
+                exit_reason = ExitReason::BudgetExhausted;
                 break;
             };
 
             if !should_continue {
                 // Budget exhausted — set grace call for one more iteration
                 self.budget.set_grace_call();
-                exit_reason = "budget_exhausted".to_string();
+                exit_reason = ExitReason::BudgetExhausted;
                 break;
             }
 
@@ -447,7 +460,7 @@ impl AIAgent {
                     msg
                 );
                 final_response = msg;
-                exit_reason = "interrupted".to_string();
+                exit_reason = ExitReason::Interrupted;
                 break;
             }
 
@@ -513,7 +526,7 @@ impl AIAgent {
                     PreLlmHookResult::Abort(msg) => {
                         tracing::info!("Pre-LLM hook aborted: {}", msg);
                         final_response = msg;
-                        exit_reason = "hook_aborted".to_string();
+                        exit_reason = ExitReason::HookAborted;
                         break;
                     }
                     PreLlmHookResult::OverrideSystem(sys) => {
@@ -678,7 +691,7 @@ impl AIAgent {
                             } else {
                                 final_response = content.to_string();
                             }
-                            exit_reason = "completed".to_string();
+                            exit_reason = ExitReason::Completed;
                             messages.push(Arc::new(response));
                             break;
                         }
@@ -698,12 +711,45 @@ impl AIAgent {
                             continue;
                         }
 
-                        // Add assistant message with tool calls
-                        messages.push(Arc::new(response));
-
                         // Deduplicate tool calls before execution.
                         // Mirrors Python `_deduplicate_tool_calls()` (run_agent.py:3573).
                         let deduped = Self::deduplicate_tool_calls(&tool_calls);
+
+                        for tc in &deduped {
+                            let name = tc.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            let args = tc.get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("{}");
+                            let key = ToolCallKey { name: name.to_string(), args: args.to_string() };
+                            let count = tool_call_history.entry(key).or_insert(0);
+                            *count += 1;
+                            if *count >= 5 {
+                                tracing::warn!("Detected repetitive tool-call loop ({}:{} >= 5 times). Breaking.", name, args);
+                                final_response = format!(
+                                    "⚠️ 我一直在重复调用同一个工具（{}），似乎陷入了循环。请换个说法重试，或者检查一下之前的工具输出是否有问题。",
+                                    name
+                                );
+                                exit_reason = ExitReason::ToolLoopDetected;
+                                messages.push(Arc::new(response.clone()));
+                                break;
+                            }
+                        }
+                        if exit_reason == ExitReason::ToolLoopDetected {
+                            break;
+                        }
+
+                        // Cap tool_call_history to prevent unbounded growth across
+                        // long conversations. Prune one-off entries when over threshold.
+                        if tool_call_history.len() > 30 {
+                            tool_call_history.retain(|_, count| *count > 1);
+                        }
+
+                        // Add assistant message with tool calls
+                        messages.push(Arc::new(response.clone()));
 
                         // Execute tools: concurrent for independent batches,
                         // sequential for interactive/dependent tools.
@@ -809,7 +855,7 @@ impl AIAgent {
                                     .unwrap_or("");
                                 truncated_response_prefix.push_str(content);
                                 final_response = truncated_response_prefix.clone();
-                                exit_reason = "partial".to_string();
+                                exit_reason = ExitReason::Partial;
                                 messages.push(Arc::new(response));
                                 break;
                             }
@@ -826,7 +872,7 @@ impl AIAgent {
                                 final_response = full;
                             }
                         }
-                        exit_reason = "completed".to_string();
+                        exit_reason = ExitReason::Completed;
                         messages.push(Arc::new(response));
                         break;
                     }
@@ -954,7 +1000,7 @@ impl AIAgent {
                                 );
                                 compression_exhausted = true;
                                 final_response = format!("Error: context too large after {} compression attempts: {}", max_compression_attempts, e);
-                                exit_reason = "llm_error".to_string();
+                                exit_reason = ExitReason::LlmError;
                                 break;
                             }
                         }
@@ -974,7 +1020,7 @@ impl AIAgent {
                             if self.config.fallback_providers.is_empty() {
                                 tracing::error!("LLM call failed: {} ({})", e, failure_hint);
                                 final_response = format!("Error: {} ({})", e, failure_hint);
-                                exit_reason = "llm_error".to_string();
+                                exit_reason = ExitReason::LlmError;
                                 break;
                             }
 
@@ -1005,7 +1051,7 @@ impl AIAgent {
                                             .and_then(Value::as_str)
                                             .unwrap_or("")
                                             .to_string();
-                                        exit_reason = "completed".to_string();
+                                        exit_reason = ExitReason::Completed;
                                         messages.push(Arc::new(resp));
                                         fallback_succeeded = true;
                                         // Mark fallback activated — next turn will restore primary.
@@ -1041,13 +1087,13 @@ impl AIAgent {
                                 "Error: {} ({}); all fallbacks also failed. Last: {}",
                                 e, failure_hint, last_fb_err
                             );
-                            exit_reason = "llm_error".to_string();
+                            exit_reason = ExitReason::LlmError;
                             break;
                         }
                         FailoverAction::Abort => {
                             tracing::error!("LLM call failed (non-recoverable): {} ({})", e, failure_hint);
                             final_response = format!("Error: {} ({})", e, failure_hint);
-                            exit_reason = "llm_error".to_string();
+                            exit_reason = ExitReason::LlmError;
                             break;
                         }
                     }
@@ -1066,7 +1112,7 @@ impl AIAgent {
                         "Error: no response from provider for {}s (model: {}, ~{} tokens)",
                         timeout_secs, self.config.model, est_tokens
                     );
-                    exit_reason = "llm_error".to_string();
+                    exit_reason = ExitReason::LlmError;
                     break;
                 }
             }
@@ -1089,19 +1135,19 @@ impl AIAgent {
         }
 
         // If loop ended without setting exit_reason
-        if !matches!(exit_reason.as_ref(), "completed" | "llm_error" | "budget_exhausted") {
-            exit_reason = "max_iterations".to_string();
+        if !matches!(exit_reason, ExitReason::Completed | ExitReason::LlmError | ExitReason::BudgetExhausted) {
+            exit_reason = ExitReason::MaxIterations;
         }
 
         // Memory sync: record user/assistant turn for external providers
-        if exit_reason == "completed" && !final_response.is_empty() {
+        if exit_reason == ExitReason::Completed && !final_response.is_empty() {
             if let Some(ref sid) = self.config.session_id {
                 self.memory_manager.sync_all(user_message, &final_response, sid);
             }
         }
 
         // Persist session to SQLite and trajectory files
-        let completed = exit_reason == "completed";
+        let completed = exit_reason == ExitReason::Completed;
         self.persist_session(&messages, user_message, completed);
 
         let mut end_ctx = std::collections::HashMap::new();
@@ -1114,7 +1160,7 @@ impl AIAgent {
             response: final_response,
             messages,
             api_calls: api_call_count,
-            exit_reason: exit_reason.to_string(),
+            exit_reason,
             compression_exhausted,
             usage: self.take_last_usage(),
         }
@@ -1584,101 +1630,7 @@ impl AIAgent {
         result.trim().to_string()
     }
 
-    /// Strip reasoning/thinking blocks from content.
-    ///
-    /// Mirrors Python `_strip_think_blocks()` (run_agent.py:2096).
-    /// Handles all tag variants: <think>, <thinking>, <reasoning>,
-    /// <REASONING_SCRATCHPAD>, <thought>, <think>, etc.
-    #[allow(dead_code)]
-    fn strip_think_blocks(content: &str) -> String {
-        let mut result = String::with_capacity(content.len());
-        let bytes = content.as_bytes();
-        let len = bytes.len();
-        let mut i = 0;
-
-        while i < len {
-            // <|think|>...|>
-            if content[i..].starts_with("<|think|>") {
-                if let Some(end) = content[i+9..].find("|>") {
-                    i += end + 11;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // <think>...
-            if content[i..].starts_with("<think>") {
-                if let Some(end) = content[i..].find("</think>") {
-                    i += end + 9;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // <thinking>...</thinking> (case-insensitive)
-            if content[i..].to_lowercase().starts_with("<thinking>") {
-                let lower = content[i..].to_lowercase();
-                if let Some(end) = lower.find("</thinking>") {
-                    i += end + 11;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // <reasoning>...</reasoning>
-            if content[i..].starts_with("<reasoning>") {
-                if let Some(end) = content[i..].find("</reasoning>") {
-                    i += end + 12;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // <REASONING_SCRATCHPAD>...</REASONING_SCRATCHPAD>
-            if content[i..].starts_with("<REASONING_SCRATCHPAD>") {
-                if let Some(end) = content[i..].find("</REASONING_SCRATCHPAD>") {
-                    i += end + 25;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // <thought>...</thought> (case-insensitive)
-            if content[i..].to_lowercase().starts_with("<thought>") {
-                let lower = content[i..].to_lowercase();
-                if let Some(end) = lower.find("</thought>") {
-                    i += end + 10;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // Strip bare closing tags that leaked through
-            if content[i..].starts_with("</think>")
-                || content[i..].starts_with("</thinking>")
-                || content[i..].starts_with("</reasoning>")
-                || content[i..].starts_with("</thought>")
-                || content[i..].starts_with("</REASONING_SCRATCHPAD>")
-            {
-                if let Some(gt) = content[i..].find('>') {
-                    i += gt + 1;
-                    continue;
-                }
-            }
-
-            // Not inside a think block — emit byte
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-
-        result
-    }
+    /// Check if content has actual text after reasoning/thinking blocks.
 
     /// Check if content has actual text after reasoning/thinking blocks.
     ///
@@ -1690,7 +1642,7 @@ impl AIAgent {
         if content.is_empty() {
             return false;
         }
-        !Self::strip_think_blocks(content).trim().is_empty()
+        !hermes_core::strip_think_blocks(content).trim().is_empty()
     }
 
     /// Detect Codex-style intermediate acknowledgment.
@@ -1708,7 +1660,7 @@ impl AIAgent {
             return false;
         }
 
-        let assistant_text = Self::strip_think_blocks(assistant_content);
+        let assistant_text = hermes_core::strip_think_blocks(assistant_content);
         let assistant_text = assistant_text.trim().to_lowercase();
         if assistant_text.is_empty() {
             return false;
@@ -1754,13 +1706,13 @@ impl AIAgent {
     /// Mirrors Python `_interim_content_was_streamed()` (run_agent.py:5117).
     #[allow(dead_code)]
     fn interim_content_was_streamed(&self, content: &str) -> bool {
-        let visible = Self::normalize_interim_visible_text(&Self::strip_think_blocks(content));
+        let visible = Self::normalize_interim_visible_text(&hermes_core::strip_think_blocks(content));
         if visible.is_empty() {
             return false;
         }
         let streamed = {
             let tracked = self.current_streamed_assistant_text.lock();
-            Self::normalize_interim_visible_text(&Self::strip_think_blocks(&tracked))
+            Self::normalize_interim_visible_text(&hermes_core::strip_think_blocks(&tracked))
         };
         !streamed.is_empty() && streamed == visible
     }
@@ -1777,7 +1729,7 @@ impl AIAgent {
         let Some(content) = assistant_msg.get("content").and_then(Value::as_str) else {
             return;
         };
-        let visible = Self::strip_think_blocks(content);
+        let visible = hermes_core::strip_think_blocks(content);
         let visible = visible.trim();
         if visible.is_empty() || visible == "(empty)" {
             return;
@@ -2816,6 +2768,7 @@ mod tests {
             fallback_providers: Vec::new(),
             session_db: None,
             persist_session: true,
+            tool_use_enforcement: hermes_prompt::ToolUseEnforcement::Auto,
         };
         assert_eq!(config.model, "openai/gpt-4");
         assert_eq!(config.max_iterations, 30);
@@ -2881,7 +2834,7 @@ mod tests {
         agent.store_delegate_results(vec![SubagentResult {
             goal: "test".to_string(),
             response: "done".to_string(),
-            exit_reason: "completed".to_string(),
+            exit_reason: ExitReason::Completed,
             api_calls: 3,
         }]);
 
@@ -2994,14 +2947,14 @@ mod tests {
             response: "hello".to_string(),
             messages: vec![Arc::new(serde_json::json!({"role": "user", "content": "hi"}))],
             api_calls: 1,
-            exit_reason: "completed".to_string(),
+            exit_reason: ExitReason::Completed,
             compression_exhausted: false,
             usage: None,
         };
         assert_eq!(result.response, "hello");
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.api_calls, 1);
-        assert_eq!(result.exit_reason, "completed");
+        assert_eq!(result.exit_reason, ExitReason::Completed);
         assert!(!result.compression_exhausted);
     }
 
@@ -3062,7 +3015,7 @@ mod tests {
         agent.store_delegate_results(vec![SubagentResult {
             goal: "test".to_string(),
             response: "done".to_string(),
-            exit_reason: "completed".to_string(),
+            exit_reason: ExitReason::Completed,
             api_calls: 1,
         }]);
         assert!(agent.take_delegate_results().is_some());
@@ -3071,7 +3024,7 @@ mod tests {
         agent.store_delegate_results(vec![SubagentResult {
             goal: "test2".to_string(),
             response: "done2".to_string(),
-            exit_reason: "completed".to_string(),
+            exit_reason: ExitReason::Completed,
             api_calls: 2,
         }]);
         agent.close();

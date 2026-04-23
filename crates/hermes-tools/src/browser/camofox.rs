@@ -385,7 +385,7 @@ static CAMOFOX_SESSIONS: std::sync::LazyLock<Mutex<HashMap<String, CamofoxSessio
 /// Mirrors Python `_managed_persistence_enabled`.
 fn managed_persistence_enabled() -> bool {
     std::env::var("CAMOFOX_MANAGED_PERSISTENCE")
-        .map(|v| v == "true" || v == "1")
+        .map(|v| hermes_core::coerce_bool(&v))
         .unwrap_or(false)
 }
 

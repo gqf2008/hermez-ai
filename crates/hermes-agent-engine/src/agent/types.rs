@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 /// Conversation message wrapped in Arc to avoid deep clones.
 pub type Message = Arc<serde_json::Value>;
 
@@ -145,6 +147,8 @@ pub struct AgentConfig {
     pub session_db: Option<Arc<hermes_state::SessionDB>>,
     /// Whether to persist sessions to disk.
     pub persist_session: bool,
+    /// Tool-use enforcement mode for prompt builder.
+    pub tool_use_enforcement: hermes_prompt::ToolUseEnforcement,
 }
 
 /// Fallback provider configuration.
@@ -183,6 +187,46 @@ impl Default for AgentConfig {
             fallback_providers: Vec::new(),
             session_db: None,
             persist_session: true,
+            tool_use_enforcement: hermes_prompt::ToolUseEnforcement::Auto,
+        }
+    }
+}
+
+/// Exit reason for a conversation turn or subagent task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitReason {
+    Completed,
+    MaxIterations,
+    BudgetExhausted,
+    Interrupted,
+    HookAborted,
+    ToolLoopDetected,
+    Partial,
+    LlmError,
+    DepthLimit,
+    TooManyTasks,
+    Panic,
+    CreationError,
+    NaturalStop,
+}
+
+impl std::fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExitReason::Completed => write!(f, "completed"),
+            ExitReason::MaxIterations => write!(f, "max_iterations"),
+            ExitReason::BudgetExhausted => write!(f, "budget_exhausted"),
+            ExitReason::Interrupted => write!(f, "interrupted"),
+            ExitReason::HookAborted => write!(f, "hook_aborted"),
+            ExitReason::ToolLoopDetected => write!(f, "tool_loop_detected"),
+            ExitReason::Partial => write!(f, "partial"),
+            ExitReason::LlmError => write!(f, "llm_error"),
+            ExitReason::DepthLimit => write!(f, "depth_limit"),
+            ExitReason::TooManyTasks => write!(f, "too_many_tasks"),
+            ExitReason::Panic => write!(f, "panic"),
+            ExitReason::CreationError => write!(f, "creation_error"),
+            ExitReason::NaturalStop => write!(f, "natural_stop"),
         }
     }
 }
@@ -197,7 +241,7 @@ pub struct TurnResult {
     /// Number of API calls made.
     pub api_calls: usize,
     /// Exit reason.
-    pub exit_reason: String,
+    pub exit_reason: ExitReason,
     /// Compression exhaustion flag — set when max compression attempts
     /// were reached without resolving the context overflow. The caller
     /// (e.g., gateway) should auto-reset the session to break the loop.

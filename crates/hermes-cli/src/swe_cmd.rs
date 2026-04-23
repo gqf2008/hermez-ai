@@ -80,7 +80,7 @@ impl AgentRunner for SweAgentRunner {
         AgentResult {
             messages: rl_messages,
             turns_used,
-            finished_naturally: turn_result.exit_reason == "natural_stop",
+            finished_naturally: turn_result.exit_reason == hermes_agent_engine::agent::ExitReason::NaturalStop,
             reasoning_per_turn: Vec::new(),
             tool_errors: Vec::new(),
             tools_used,

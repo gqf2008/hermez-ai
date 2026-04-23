@@ -12,3 +12,4 @@ pub(crate) mod session;
 pub mod platforms;
 pub(crate) mod stream_consumer;
 pub(crate) mod mcp_config;
+pub(crate) mod utils;

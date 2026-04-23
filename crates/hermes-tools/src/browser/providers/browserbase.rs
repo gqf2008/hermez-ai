@@ -33,7 +33,7 @@ impl Default for BrowserbaseConfig {
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
             advanced_stealth: std::env::var("BROWSERBASE_ADVANCED_STEALTH")
-                .map(|v| v == "true" || v == "1")
+                .map(|v| hermes_core::coerce_bool(&v))
                 .unwrap_or(false),
             session_timeout_ms: std::env::var("BROWSERBASE_SESSION_TIMEOUT")
                 .ok()

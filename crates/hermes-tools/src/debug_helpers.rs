@@ -40,7 +40,7 @@ impl DebugSession {
     /// Activated if the specified environment variable is set to "true".
     pub fn new(tool_name: &str, env_var: &str) -> Self {
         let enabled = std::env::var(env_var)
-            .map(|v| v == "true")
+            .map(|v| hermes_core::coerce_bool(&v))
             .unwrap_or(false);
 
         let session_id = if enabled { Some(Uuid::new_v4()) } else { None };

@@ -199,17 +199,6 @@ impl ToolRegistry {
                 }
             }
 
-            // Check required env vars
-            if !entry.requires_env.is_empty() {
-                let all_env_set = entry
-                    .requires_env
-                    .iter()
-                    .all(|var| std::env::var(var).is_ok());
-                if !all_env_set {
-                    continue;
-                }
-            }
-
             // Wrap in OpenAI function-calling format
             // Clone the inner Value for mutation (schema storage is Arc'd, so this
             // is cheaper than before when entry.schema was a bare Value).
@@ -249,8 +238,7 @@ impl ToolRegistry {
                         return false;
                     }
                 }
-                // Check env vars
-                entry.requires_env.iter().all(|var| std::env::var(var).is_ok())
+                true
             })
             .cloned()
             .collect()

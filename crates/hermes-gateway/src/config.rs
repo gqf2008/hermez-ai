@@ -302,28 +302,7 @@ impl GatewayConfig {
 
 /// Parse a platform string into a Platform enum variant.
 pub fn parse_platform(s: &str) -> Result<Platform, String> {
-    match s {
-        "local" => Ok(Platform::Local),
-        "telegram" => Ok(Platform::Telegram),
-        "discord" => Ok(Platform::Discord),
-        "whatsapp" => Ok(Platform::Whatsapp),
-        "slack" => Ok(Platform::Slack),
-        "signal" => Ok(Platform::Signal),
-        "mattermost" => Ok(Platform::Mattermost),
-        "matrix" => Ok(Platform::Matrix),
-        "homeassistant" => Ok(Platform::Homeassistant),
-        "email" => Ok(Platform::Email),
-        "sms" => Ok(Platform::Sms),
-        "dingtalk" => Ok(Platform::Dingtalk),
-        "api_server" => Ok(Platform::ApiServer),
-        "webhook" => Ok(Platform::Webhook),
-        "feishu" => Ok(Platform::Feishu),
-        "wecom" => Ok(Platform::Wecom),
-        "wecom_callback" => Ok(Platform::WecomCallback),
-        "weixin" => Ok(Platform::Weixin),
-        "bluebubbles" => Ok(Platform::Bluebubbles),
-        _ => Err(format!("Unknown platform: {s}")),
-    }
+    Platform::from_str(s).ok_or_else(|| format!("Unknown platform: {s}"))
 }
 
 // ── Config loading ─────────────────────────────────────────────────────────

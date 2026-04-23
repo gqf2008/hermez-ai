@@ -15,6 +15,9 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
+/// Stale-session timeout: sessions older than this are auto-cleaned (seconds).
+const STALE_SESSION_TIMEOUT_SECS: f64 = 300.0;
+
 /// Registry for pending user approvals (gateway-level blocking).
 ///
 /// When an agent tool requires user approval (e.g. dangerous shell command),
@@ -52,6 +55,40 @@ impl ApprovalRegistry {
     }
 }
 
+/// Check if a chat session is currently busy.
+///
+/// If the session is stale (older than `STALE_SESSION_TIMEOUT_SECS`),
+/// removes it from both `sessions` and `busy_ack_ts` and returns `None`.
+/// Returns `Some(elapsed_minutes)` if the session is active.
+fn check_busy_session(
+    sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
+    chat_id: &str,
+) -> Option<f64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let stale = {
+        let mut sessions = sessions.lock();
+        if let Some(&start_ts) = sessions.get(chat_id) {
+            let elapsed_secs = now - start_ts;
+            if elapsed_secs > STALE_SESSION_TIMEOUT_SECS {
+                sessions.remove(chat_id);
+                true
+            } else {
+                return Some(elapsed_secs / 60.0);
+            }
+        } else {
+            return None;
+        }
+    };
+    if stale {
+        busy_ack_ts.lock().remove(chat_id);
+    }
+    None
+}
+
 use crate::config::{Platform, PlatformConfig};
 use crate::platforms::api_server::{ApiServerAdapter, ApiServerConfig, ApiServerState};
 use crate::session::{SessionSource, SessionStore, build_session_key};
@@ -81,6 +118,16 @@ pub struct GatewayConfig {
     pub platforms: Vec<PlatformConfigEntry>,
     /// Default model to use.
     pub default_model: String,
+    /// Provider override (e.g., "custom", "anthropic").
+    pub provider: Option<String>,
+    /// Base URL for custom endpoints.
+    pub base_url: Option<String>,
+    /// API key.
+    pub api_key: Option<String>,
+    /// API mode: "openai", "anthropic_messages", "codex_responses".
+    pub api_mode: Option<String>,
+    /// Feishu stream mode from config.
+    pub feishu_stream_mode: bool,
 }
 
 /// A platform configuration entry with its enabled status.
@@ -105,6 +152,8 @@ pub struct HandlerResult {
     pub compression_exhausted: bool,
     /// Token usage from the LLM response (if available).
     pub usage: Option<TokenUsage>,
+    /// When true, the handler has already sent the response (e.g. via streaming).
+    pub already_sent: bool,
 }
 
 /// Token usage info from the LLM.
@@ -161,51 +210,18 @@ pub trait MessageHandler: Send + Sync + 'static {
 #[derive(Clone)]
 struct HealthCheckStatus {
     running: Arc<AtomicBool>,
-    feishu: bool,
-    weixin: bool,
-    telegram: bool,
-    discord: bool,
-    slack: bool,
-    api_server: bool,
-    dingtalk: bool,
-    wecom: bool,
-    whatsapp: bool,
-    webhook: bool,
-    qqbot: bool,
-    email: bool,
-    sms: bool,
-    matrix: bool,
-    homeassistant: bool,
-    mattermost: bool,
-    signal: bool,
-    bluebubbles: bool,
-    wecom_callback: bool,
+    platforms: std::collections::HashMap<String, bool>,
 }
 
 /// Health check HTTP handler.
 async fn health_handler(
     axum::extract::State(status): axum::extract::State<Arc<HealthCheckStatus>>,
 ) -> axum::Json<serde_json::Value> {
-    let mut platforms = serde_json::Map::new();
-    platforms.insert("feishu".into(), serde_json::json!(status.feishu));
-    platforms.insert("weixin".into(), serde_json::json!(status.weixin));
-    platforms.insert("telegram".into(), serde_json::json!(status.telegram));
-    platforms.insert("discord".into(), serde_json::json!(status.discord));
-    platforms.insert("slack".into(), serde_json::json!(status.slack));
-    platforms.insert("api_server".into(), serde_json::json!(status.api_server));
-    platforms.insert("dingtalk".into(), serde_json::json!(status.dingtalk));
-    platforms.insert("wecom".into(), serde_json::json!(status.wecom));
-    platforms.insert("whatsapp".into(), serde_json::json!(status.whatsapp));
-    platforms.insert("webhook".into(), serde_json::json!(status.webhook));
-    platforms.insert("qqbot".into(), serde_json::json!(status.qqbot));
-    platforms.insert("email".into(), serde_json::json!(status.email));
-    platforms.insert("sms".into(), serde_json::json!(status.sms));
-    platforms.insert("matrix".into(), serde_json::json!(status.matrix));
-    platforms.insert("homeassistant".into(), serde_json::json!(status.homeassistant));
-    platforms.insert("mattermost".into(), serde_json::json!(status.mattermost));
-    platforms.insert("signal".into(), serde_json::json!(status.signal));
-    platforms.insert("bluebubbles".into(), serde_json::json!(status.bluebubbles));
-    platforms.insert("wecom_callback".into(), serde_json::json!(status.wecom_callback));
+    let platforms: serde_json::Map<String, serde_json::Value> = status
+        .platforms
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
+        .collect();
 
     let body = serde_json::json!({
         "status": if status.running.load(Ordering::SeqCst) { "ok" } else { "stopped" },
@@ -347,7 +363,10 @@ impl GatewayRunner {
             }
             match entry.platform {
                 Platform::Feishu => {
-                    let feishu_config = FeishuConfig::from_env();
+                    let mut feishu_config = FeishuConfig::from_env();
+                    if self.config.feishu_stream_mode {
+                        feishu_config.stream_mode = true;
+                    }
                     if !feishu_config.app_id.is_empty() && !feishu_config.app_secret.is_empty() {
                         info!("Initializing Feishu adapter...");
                         self.feishu_adapter = Some(Arc::new(FeishuAdapter::new(feishu_config, self.approval_registry.clone())));
@@ -529,33 +548,37 @@ impl GatewayRunner {
             }
         }
 
-        let feishu_count = self.feishu_adapter.is_some() as usize;
-        let weixin_count = self.weixin_adapter.is_some() as usize;
-        let telegram_count = self.telegram_adapter.is_some() as usize;
-        let discord_count = self.discord_adapter.is_some() as usize;
-        let slack_count = self.slack_adapter.is_some() as usize;
-        let api_server_count = self.api_server_adapter.is_some() as usize;
-        let dingtalk_count = self.dingtalk_adapter.is_some() as usize;
-        let wecom_count = self.wecom_adapter.is_some() as usize;
-        let whatsapp_count = self.whatsapp_adapter.is_some() as usize;
-        let webhook_count = self.webhook_adapter.is_some() as usize;
-        let qqbot_count = self.qqbot_adapter.is_some() as usize;
-        let email_count = self.email_adapter.is_some() as usize;
-        let sms_count = self.sms_adapter.is_some() as usize;
-        let matrix_count = self.matrix_adapter.is_some() as usize;
-        let homeassistant_count = self.homeassistant_adapter.is_some() as usize;
-        let mattermost_count = self.mattermost_adapter.is_some() as usize;
-        let signal_count = self.signal_adapter.is_some() as usize;
-        let bluebubbles_count = self.bluebubbles_adapter.is_some() as usize;
-        let wecom_callback_count = self.wecom_callback_adapter.is_some() as usize;
-        let feishu_webhook_count = self.feishu_adapter.as_ref()
-            .map(|a| matches!(a.config.connection_mode, FeishuConnectionMode::Webhook))
-            .unwrap_or(false) as usize;
+        let adapters: [(&str, bool); 20] = [
+            ("feishu", self.feishu_adapter.is_some()),
+            ("weixin", self.weixin_adapter.is_some()),
+            ("telegram", self.telegram_adapter.is_some()),
+            ("discord", self.discord_adapter.is_some()),
+            ("slack", self.slack_adapter.is_some()),
+            ("api_server", self.api_server_adapter.is_some()),
+            ("dingtalk", self.dingtalk_adapter.is_some()),
+            ("wecom", self.wecom_adapter.is_some()),
+            ("whatsapp", self.whatsapp_adapter.is_some()),
+            ("webhook", self.webhook_adapter.is_some()),
+            ("qqbot", self.qqbot_adapter.is_some()),
+            ("email", self.email_adapter.is_some()),
+            ("sms", self.sms_adapter.is_some()),
+            ("matrix", self.matrix_adapter.is_some()),
+            ("homeassistant", self.homeassistant_adapter.is_some()),
+            ("mattermost", self.mattermost_adapter.is_some()),
+            ("signal", self.signal_adapter.is_some()),
+            ("bluebubbles", self.bluebubbles_adapter.is_some()),
+            ("wecom_callback", self.wecom_callback_adapter.is_some()),
+            ("feishu_webhook", self.feishu_adapter.as_ref()
+                .map(|a| matches!(a.config.connection_mode, FeishuConnectionMode::Webhook))
+                .unwrap_or(false)),
+        ];
+        let total = adapters.iter().filter(|(_, active)| *active).count();
+        let names: Vec<_> = adapters.iter().filter(|(_, a)| *a).map(|(n, _)| *n).collect();
         info!(
-            "Gateway initialized: {} platform(s) ready",
-            feishu_count + weixin_count + telegram_count + discord_count + slack_count + api_server_count + dingtalk_count + wecom_count + whatsapp_count + webhook_count + qqbot_count + email_count + sms_count + matrix_count + homeassistant_count + mattermost_count + signal_count + bluebubbles_count + wecom_callback_count
+            "Gateway initialized: {} platform(s) ready {:?}",
+            total, names
         );
-        if feishu_webhook_count > 0 {
+        if adapters.iter().any(|(name, active)| *name == "feishu_webhook" && *active) {
             info!("Feishu webhook: port={} path={}",
                 self.feishu_adapter.as_ref().unwrap().config.webhook_port,
                 self.feishu_adapter.as_ref().unwrap().config.webhook_path
@@ -576,6 +599,23 @@ impl GatewayRunner {
 
         // Spawn platform-specific polling tasks
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+        // Start background cron scheduler so scheduled jobs fire automatically.
+        // Mirrors Python: _start_cron_ticker() in gateway/run.py.
+        let cron_running = self.running.clone();
+        let cron_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if !cron_running.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Tick once (non-verbose, no infinite loop — we handle looping here)
+                let _ = hermes_cron::scheduler::tick_once().await;
+            }
+            tracing::info!("Cron ticker stopped");
+        });
+        handles.push(cron_handle);
 
         if let Some(adapter) = &self.weixin_adapter {
             let adapter = adapter.clone();
@@ -701,15 +741,18 @@ impl GatewayRunner {
                                 content.chars().take(50).collect::<String>(),
                             );
 
-                            // Check busy session
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs_f64();
-                            let is_busy = {
-                                let sessions = running_sessions.lock();
-                                sessions.contains_key(chat_id)
-                            };
+
+                            // Check busy session
+                            let is_busy = check_busy_session(
+                                &running_sessions,
+                                &busy_ack_ts,
+                                chat_id,
+                            )
+                            .is_some();
 
                             if is_busy {
                                 // Allow /stop even when the session is busy
@@ -859,15 +902,18 @@ impl GatewayRunner {
                                             content.chars().take(50).collect::<String>(),
                                         );
 
-                                        // Check busy session
                                         let now = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_secs_f64();
-                                        let is_busy = {
-                                            let sessions = running_sessions.lock();
-                                            sessions.contains_key(chat_id)
-                                        };
+
+                                        // Check busy session
+                                        let is_busy = check_busy_session(
+                                            &running_sessions,
+                                            &busy_ack_ts,
+                                            chat_id,
+                                        )
+                                        .is_some();
 
                                         if is_busy {
                                             // Allow /stop even when the session is busy
@@ -953,7 +999,7 @@ impl GatewayRunner {
                                                     let _ = adapter.send_text(chat_id,
                                                         "Session reset: conversation context grew too large. Starting fresh.").await;
                                                 }
-                                                if !result.response.is_empty() {
+                                                if !result.response.is_empty() && !result.already_sent {
                                                     if let Err(e) =
                                                         adapter.send_text_or_post(chat_id, &result.response).await
                                                     {
@@ -966,7 +1012,7 @@ impl GatewayRunner {
                                                 busy_ack_ts.lock().remove(chat_id);
                                                 error!("Agent handler failed for Feishu message: {e}");
                                                 let _ = adapter
-                                                    .send_text(
+                                                    .finalize_stream_with_error(
                                                         chat_id,
                                                         "Sorry, I encountered an error processing your message.",
                                                     )
@@ -987,8 +1033,14 @@ impl GatewayRunner {
                 }
                 FeishuConnectionMode::WebSocket => {
                     let ws_client = crate::platforms::feishu_ws::FeishuWsClient::new(adapter.config.clone());
-                    let adapter = adapter.clone();
+                    let adapter_for_cb = adapter.clone();
                     let handler = self.message_handler.clone();
+                    let running = self.running.clone();
+                    let running_sessions = self.running_sessions.clone();
+                    let busy_ack_ts = self.busy_ack_ts.clone();
+                    let session_store = self.session_store.clone();
+                    let default_model = self.config.default_model.clone();
+                    let per_chat_model = self.per_chat_model.clone();
                     let handle = tokio::spawn(async move {
                         // Wire the global message handler into the adapter so that
                         // platform-specific flows (e.g. drive comment replies) can
@@ -997,6 +1049,164 @@ impl GatewayRunner {
                             let guard = handler.lock().await;
                             *adapter.message_handler.lock().await = guard.clone();
                         }
+
+                        // Set up on_message callback (same as webhook mode) so that
+                        // process_ws_event can dispatch IM messages through the agent.
+                        let handler_for_cb = handler.clone();
+                        let running_for_cb = running.clone();
+                        let adapter_for_on_msg = adapter_for_cb.clone();
+                        let running_sessions_for_cb = running_sessions.clone();
+                        let busy_ack_ts_for_cb = busy_ack_ts.clone();
+                        let session_store_for_cb = session_store.clone();
+                        let default_model_for_cb = default_model.clone();
+                        let per_chat_model_for_cb = per_chat_model.clone();
+                        adapter.on_message.write().await.replace(Arc::new(
+                            move |event: FeishuMessageEvent| {
+                                let handler = handler_for_cb.clone();
+                                let running = running_for_cb.clone();
+                                let adapter = adapter_for_on_msg.clone();
+                                let running_sessions = running_sessions_for_cb.clone();
+                                let busy_ack_ts = busy_ack_ts_for_cb.clone();
+                                let session_store = session_store_for_cb.clone();
+                                let default_model = default_model_for_cb.clone();
+                                let per_chat_model = per_chat_model_for_cb.clone();
+                                tokio::spawn(async move {
+                                    if !running.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    let guard = handler.lock().await;
+                                    if let Some(h) = guard.as_ref() {
+                                        let chat_id = &event.chat_id;
+                                        let content = &event.content;
+                                        info!(
+                                            "Feishu message from {} via {}: {}",
+                                            event.sender_id,
+                                            chat_id,
+                                            content.chars().take(50).collect::<String>(),
+                                        );
+
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs_f64();
+
+                                        // Check busy session
+                                        let is_busy = check_busy_session(
+                                            &running_sessions,
+                                            &busy_ack_ts,
+                                            chat_id,
+                                        )
+                                        .is_some();
+
+                                        if is_busy {
+                                            // Allow /stop even when the session is busy
+                                            if GatewayCommand::parse(content)
+                                                .map(|c| c.name == "/stop")
+                                                .unwrap_or(false)
+                                            {
+                                                let ctx = command_ctx(
+                                                    Platform::Feishu, chat_id, if event.is_group { "group" } else { "dm" },
+                                                    Some(event.sender_id.clone()), None,
+                                                    &session_store, &running_sessions, &busy_ack_ts,
+                                                    &default_model, &per_chat_model, Some(h),
+                                                );
+                                                if let Some(reply) = try_handle_command(&ctx, content).await {
+                                                    let _ = adapter.send_text(chat_id, &reply).await;
+                                                }
+                                                return;
+                                            }
+
+                                            let should_ack = {
+                                                let mut ack_map = busy_ack_ts.lock();
+                                                let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
+                                                if now - last_ack < 30.0 {
+                                                    false
+                                                } else {
+                                                    ack_map.insert(chat_id.to_string(), now);
+                                                    true
+                                                }
+                                            };
+                                            if should_ack {
+                                                h.interrupt(chat_id, content);
+                                                let _ = adapter.send_text(chat_id,
+                                                    "Still processing your previous message. Please wait.").await;
+                                            }
+                                            return;
+                                        }
+
+                                        // Command detection before agent invocation
+                                        let ctx = command_ctx(
+                                            Platform::Feishu, chat_id, if event.is_group { "group" } else { "dm" },
+                                            Some(event.sender_id.clone()), None,
+                                            &session_store, &running_sessions, &busy_ack_ts,
+                                            &default_model, &per_chat_model, Some(h),
+                                        );
+                                        if let Some(reply) = try_handle_command(&ctx, content).await {
+                                            let _ = adapter.send_text_or_post(chat_id, &reply).await;
+                                            return;
+                                        }
+
+                                        {
+                                            let mut sessions = running_sessions.lock();
+                                            sessions.insert(chat_id.clone(), now);
+                                        }
+
+                                        let model_override = per_chat_model.lock().get(chat_id).cloned();
+                                        match h
+                                            .handle_message(
+                                                Platform::Feishu,
+                                                chat_id,
+                                                content,
+                                                model_override.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(result) => {
+                                                running_sessions.lock().remove(chat_id);
+                                                busy_ack_ts.lock().remove(chat_id);
+
+                                                if result.compression_exhausted {
+                                                    let source = SessionSource {
+                                                        platform: Platform::Feishu,
+                                                        chat_id: chat_id.to_string(),
+                                                        chat_name: None,
+                                                        chat_type: if event.is_group { "group".to_string() } else { "dm".to_string() },
+                                                        user_id: Some(event.sender_id.clone()),
+                                                        user_name: None,
+                                                        thread_id: None,
+                                                        chat_topic: None,
+                                                        user_id_alt: None,
+                                                        chat_id_alt: None,
+                                                    };
+                                                    session_store.reset_session_for(&source);
+                                                    let _ = adapter.send_text(chat_id,
+                                                        "Session reset: conversation context grew too large. Starting fresh.").await;
+                                                }
+                                                if !result.response.is_empty() && !result.already_sent {
+                                                    if let Err(e) =
+                                                        adapter.send_text_or_post(chat_id, &result.response).await
+                                                    {
+                                                        error!("Feishu send failed: {e}");
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                running_sessions.lock().remove(chat_id);
+                                                busy_ack_ts.lock().remove(chat_id);
+                                                error!("Agent handler failed for Feishu message: {e}");
+                                                let _ = adapter
+                                                    .finalize_stream_with_error(
+                                                        chat_id,
+                                                        "Sorry, I encountered an error processing your message.",
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                });
+                            },
+                        ));
+
                         let callback: crate::platforms::feishu_ws::WsEventCallback = std::sync::Arc::new(move |event: serde_json::Value| {
                             let adapter = adapter.clone();
                             tokio::spawn(async move {
@@ -1274,27 +1484,29 @@ impl GatewayRunner {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
+        let mut platforms = std::collections::HashMap::new();
+        platforms.insert("feishu".to_string(), self.feishu_adapter.is_some());
+        platforms.insert("weixin".to_string(), self.weixin_adapter.is_some());
+        platforms.insert("telegram".to_string(), self.telegram_adapter.is_some());
+        platforms.insert("discord".to_string(), self.discord_adapter.is_some());
+        platforms.insert("slack".to_string(), self.slack_adapter.is_some());
+        platforms.insert("api_server".to_string(), self.api_server_adapter.is_some());
+        platforms.insert("dingtalk".to_string(), self.dingtalk_adapter.is_some());
+        platforms.insert("wecom".to_string(), self.wecom_adapter.is_some());
+        platforms.insert("whatsapp".to_string(), self.whatsapp_adapter.is_some());
+        platforms.insert("webhook".to_string(), self.webhook_adapter.is_some());
+        platforms.insert("qqbot".to_string(), self.qqbot_adapter.is_some());
+        platforms.insert("email".to_string(), self.email_adapter.is_some());
+        platforms.insert("sms".to_string(), self.sms_adapter.is_some());
+        platforms.insert("matrix".to_string(), self.matrix_adapter.is_some());
+        platforms.insert("homeassistant".to_string(), self.homeassistant_adapter.is_some());
+        platforms.insert("mattermost".to_string(), self.mattermost_adapter.is_some());
+        platforms.insert("signal".to_string(), self.signal_adapter.is_some());
+        platforms.insert("bluebubbles".to_string(), self.bluebubbles_adapter.is_some());
+        platforms.insert("wecom_callback".to_string(), self.wecom_callback_adapter.is_some());
         let health_status = HealthCheckStatus {
             running: self.running.clone(),
-            feishu: self.feishu_adapter.is_some(),
-            weixin: self.weixin_adapter.is_some(),
-            telegram: self.telegram_adapter.is_some(),
-            discord: self.discord_adapter.is_some(),
-            slack: self.slack_adapter.is_some(),
-            api_server: self.api_server_adapter.is_some(),
-            dingtalk: self.dingtalk_adapter.is_some(),
-            wecom: self.wecom_adapter.is_some(),
-            whatsapp: self.whatsapp_adapter.is_some(),
-            webhook: self.webhook_adapter.is_some(),
-            qqbot: self.qqbot_adapter.is_some(),
-            email: self.email_adapter.is_some(),
-            sms: self.sms_adapter.is_some(),
-            matrix: self.matrix_adapter.is_some(),
-            homeassistant: self.homeassistant_adapter.is_some(),
-            mattermost: self.mattermost_adapter.is_some(),
-            signal: self.signal_adapter.is_some(),
-            bluebubbles: self.bluebubbles_adapter.is_some(),
-            wecom_callback: self.wecom_callback_adapter.is_some(),
+            platforms,
         };
         let (health_shutdown_tx, health_shutdown_rx) = oneshot::channel::<()>();
         let health_handle = tokio::spawn(async move {
@@ -1761,6 +1973,11 @@ async fn route_weixin_message(
     }
 
     // DM / Group policy check (mirrors Python `_process_message`)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
     let chat_id = &event.peer_id;
     if event.is_group {
         if !adapter.is_group_allowed(chat_id) {
@@ -1772,19 +1989,8 @@ async fn route_weixin_message(
         return;
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
     // Check if this session is already running (busy session handling)
-    let busy_elapsed_min: Option<f64> = {
-        let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(|&start_ts| {
-            let elapsed_secs = now - start_ts;
-            elapsed_secs / 60.0
-        })
-    };
+    let busy_elapsed_min = check_busy_session(running_sessions, busy_ack_ts, chat_id);
 
     if let Some(elapsed_min) = busy_elapsed_min {
         // Allow /stop even when the session is busy
@@ -1991,20 +2197,14 @@ async fn route_telegram_message(
         return;
     }
 
-    let chat_id = &event.chat_id;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
 
+    let chat_id = &event.chat_id;
     // Check if this session is already running (busy session handling)
-    let busy_elapsed_min: Option<f64> = {
-        let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(|&start_ts| {
-            let elapsed_secs = now - start_ts;
-            elapsed_secs / 60.0
-        })
-    };
+    let busy_elapsed_min = check_busy_session(running_sessions, busy_ack_ts, chat_id);
 
     if let Some(elapsed_min) = busy_elapsed_min {
         // Allow /stop even when the session is busy
@@ -2134,14 +2334,54 @@ pub fn load_gateway_config() -> GatewayConfig {
 
     let config_path = get_hermes_home().join("config.yaml");
     let mut platforms = Vec::new();
-    let mut default_model = "gpt-4".to_string();
+    let mut default_model = "claude-sonnet-4-6".to_string();
+    let mut provider: Option<String> = None;
+    let mut base_url: Option<String> = None;
+    let mut api_key: Option<String> = None;
+    let mut api_mode: Option<String> = None;
+    let mut feishu_stream_mode = false;
 
     if let Ok(content) = std::fs::read_to_string(&config_path) {
         if let Ok(config) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-            // Read gateway config
+            // Read top-level platforms (e.g. platforms.feishu.extra.stream_mode)
+            if let Some(platforms_map) = config.get("platforms").and_then(|v| v.as_mapping()) {
+                if let Some(feishu_cfg) = platforms_map.get(&serde_yaml::Value::String("feishu".to_string())) {
+                    // Check direct stream_mode
+                    if let Some(mode) = feishu_cfg.get("stream_mode").and_then(|v| v.as_str()) {
+                        feishu_stream_mode = hermes_core::coerce_bool(mode) || mode == "partial";
+                    }
+                    // Check extra.stream_mode
+                    if let Some(extra) = feishu_cfg.get("extra").and_then(|v| v.as_mapping()) {
+                        if let Some(mode) = extra.get(&serde_yaml::Value::String("stream_mode".to_string())).and_then(|v| v.as_str()) {
+                            feishu_stream_mode = hermes_core::coerce_bool(mode) || mode == "partial";
+                        }
+                    }
+                }
+            }
+            // Read model config (top-level config.yaml)
+            if let Some(model_cfg) = config.get("model") {
+                if let Some(name) = model_cfg.get("name").and_then(|v| v.as_str()) {
+                    if !name.is_empty() { default_model = name.to_string(); }
+                }
+                if let Some(p) = model_cfg.get("provider").and_then(|v| v.as_str()) {
+                    provider = Some(p.to_string());
+                }
+                if let Some(b) = model_cfg.get("base_url").and_then(|v| v.as_str()) {
+                    base_url = Some(b.to_string());
+                }
+                if let Some(k) = model_cfg.get("api_key").and_then(|v| v.as_str()) {
+                    api_key = Some(k.to_string());
+                }
+                if let Some(m) = model_cfg.get("api_mode").and_then(|v| v.as_str()) {
+                    api_mode = Some(m.to_string());
+                }
+            }
+            // gateway.default_model overrides if present
             if let Some(gateway) = config.get("gateway") {
                 if let Some(model) = gateway.get("default_model").and_then(|v| v.as_str()) {
-                    default_model = model.to_string();
+                    if !model.is_empty() {
+                        default_model = model.to_string();
+                    }
                 }
                 if let Some(platforms_cfg) = gateway.get("platforms") {
                     if let Some(arr) = platforms_cfg.as_sequence() {
@@ -2151,24 +2391,8 @@ pub fn load_gateway_config() -> GatewayConfig {
                                     .get("enabled")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true);
-                                let platform = match platform_str {
-                                    "feishu" => Platform::Feishu,
-                                    "weixin" => Platform::Weixin,
-                                    "wecom" => Platform::Wecom,
-                                    "telegram" => Platform::Telegram,
-                                    "discord" => Platform::Discord,
-                                    "slack" => Platform::Slack,
-                                    "api_server" => Platform::ApiServer,
-                                    "whatsapp" => Platform::Whatsapp,
-                                    "webhook" => Platform::Webhook,
-                                    "email" => Platform::Email,
-                                    "homeassistant" => Platform::Homeassistant,
-                                    "mattermost" => Platform::Mattermost,
-                                    "signal" => Platform::Signal,
-                                    "bluebubbles" => Platform::Bluebubbles,
-                                    "wecom_callback" => Platform::WecomCallback,
-                                    _ => Platform::Local,
-                                };
+                                let platform = Platform::from_str(platform_str)
+                                    .unwrap_or(Platform::Local);
                                 let cfg = PlatformConfig::default();
                                 platforms.push(PlatformConfigEntry {
                                     platform,
@@ -2177,6 +2401,30 @@ pub fn load_gateway_config() -> GatewayConfig {
                                 });
                             }
                         }
+                    }
+                }
+            }
+
+            // Also support top-level `platforms.feishu.enabled` format
+            if let Some(platforms_map) = config.get("platforms").and_then(|v| v.as_mapping()) {
+                for (key, val) in platforms_map {
+                    let name = key.as_str().unwrap_or("");
+                    let enabled = val
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    if !enabled {
+                        continue;
+                    }
+                    let Some(platform) = Platform::from_str(name) else {
+                        continue;
+                    };
+                    if !platforms.iter().any(|p| p.platform == platform) {
+                        platforms.push(PlatformConfigEntry {
+                            platform,
+                            enabled: true,
+                            config: PlatformConfig::default(),
+                        });
                     }
                 }
             }
@@ -2316,6 +2564,11 @@ pub fn load_gateway_config() -> GatewayConfig {
     GatewayConfig {
         platforms,
         default_model,
+        provider,
+        base_url,
+        api_key,
+        api_mode,
+        feishu_stream_mode,
     }
 }
 
@@ -2391,20 +2644,14 @@ async fn route_whatsapp_message(
         return;
     }
 
-    let chat_id = &event.chat_id;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
 
+    let chat_id = &event.chat_id;
     // Check if this session is already running (busy session handling)
-    let busy_elapsed_min: Option<f64> = {
-        let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(|start_ts| {
-            let elapsed_secs = now - start_ts;
-            elapsed_secs / 60.0
-        })
-    };
+    let busy_elapsed_min = check_busy_session(running_sessions, busy_ack_ts, chat_id);
 
     if let Some(elapsed_min) = busy_elapsed_min {
         // Allow /stop even when the session is busy
@@ -2595,25 +2842,19 @@ async fn route_email_message(
 ) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
     let chat_id = &event.chat_id;
     let content = &event.content;
     if content.is_empty() && event.media_paths.is_empty() {
         return;
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
     // Check if this session is already running (busy session handling)
-    let busy_elapsed_min: Option<f64> = {
-        let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(|&start_ts| {
-            let elapsed_secs = now - start_ts;
-            elapsed_secs / 60.0
-        })
-    };
+    let busy_elapsed_min = check_busy_session(running_sessions, busy_ack_ts, chat_id);
 
     if let Some(elapsed_min) = busy_elapsed_min {
         // Allow /stop even when the session is busy
@@ -2660,6 +2901,11 @@ async fn route_email_message(
         }
         return;
     }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
 
     info!(
         "Email message from {}: {}",
@@ -2803,20 +3049,14 @@ async fn route_qqbot_message(
         return;
     }
 
-    let chat_id = &event.chat_id;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
 
+    let chat_id = &event.chat_id;
     // Check if this session is already running (busy session handling)
-    let busy_elapsed_min: Option<f64> = {
-        let sessions = running_sessions.lock();
-        sessions.get(chat_id).map(|&start_ts| {
-            let elapsed_secs = now - start_ts;
-            elapsed_secs / 60.0
-        })
-    };
+    let busy_elapsed_min = check_busy_session(running_sessions, busy_ack_ts, chat_id);
 
     if let Some(elapsed_min) = busy_elapsed_min {
         // Allow /stop even when the session is busy
@@ -2970,6 +3210,11 @@ mod tests {
         let config = GatewayConfig {
             platforms: vec![],
             default_model: "test".to_string(),
+            provider: None,
+            base_url: None,
+            api_key: None,
+            api_mode: None,
+            feishu_stream_mode: false,
         };
         let runner = GatewayRunner::new(config);
         let status = runner.status();
@@ -3008,6 +3253,11 @@ mod tests {
                 },
             ],
             default_model: "test".to_string(),
+            provider: None,
+            base_url: None,
+            api_key: None,
+            api_mode: None,
+            feishu_stream_mode: false,
         };
         let runner = GatewayRunner::new(config);
         let status = runner.status();
@@ -3017,33 +3267,35 @@ mod tests {
     #[test]
     fn test_health_check_status_platforms() {
         let running = Arc::new(AtomicBool::new(true));
+        let mut platforms = std::collections::HashMap::new();
+        platforms.insert("feishu".to_string(), true);
+        platforms.insert("weixin".to_string(), false);
+        platforms.insert("telegram".to_string(), true);
+        platforms.insert("discord".to_string(), false);
+        platforms.insert("slack".to_string(), true);
+        platforms.insert("api_server".to_string(), false);
+        platforms.insert("dingtalk".to_string(), true);
+        platforms.insert("wecom".to_string(), false);
+        platforms.insert("whatsapp".to_string(), true);
+        platforms.insert("webhook".to_string(), false);
+        platforms.insert("qqbot".to_string(), false);
+        platforms.insert("email".to_string(), false);
+        platforms.insert("sms".to_string(), false);
+        platforms.insert("matrix".to_string(), false);
+        platforms.insert("homeassistant".to_string(), false);
+        platforms.insert("mattermost".to_string(), false);
+        platforms.insert("signal".to_string(), false);
+        platforms.insert("bluebubbles".to_string(), false);
+        platforms.insert("wecom_callback".to_string(), false);
         let status = HealthCheckStatus {
             running: running.clone(),
-            feishu: true,
-            weixin: false,
-            telegram: true,
-            discord: false,
-            slack: true,
-            api_server: false,
-            dingtalk: true,
-            wecom: false,
-            whatsapp: true,
-            webhook: false,
-            qqbot: false,
-            email: false,
-            sms: false,
-            matrix: false,
-            homeassistant: false,
-            mattermost: false,
-            signal: false,
-            bluebubbles: false,
-            wecom_callback: false,
+            platforms,
         };
         // Verify clone works since HealthCheckStatus derives Clone
         let cloned = status.clone();
         assert!(cloned.running.load(Ordering::SeqCst));
-        assert!(cloned.whatsapp);
-        assert!(!cloned.weixin);
+        assert!(cloned.platforms.get("whatsapp").copied().unwrap_or(false));
+        assert!(!cloned.platforms.get("weixin").copied().unwrap_or(true));
     }
 
     #[test]

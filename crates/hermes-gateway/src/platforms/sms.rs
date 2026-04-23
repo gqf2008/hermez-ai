@@ -76,7 +76,7 @@ impl Default for SmsConfig {
             webhook_url: std::env::var("SMS_WEBHOOK_URL").unwrap_or_default(),
             insecure_no_signature: std::env::var("SMS_INSECURE_NO_SIGNATURE")
                 .ok()
-                .map(|s| s.to_lowercase() == "true")
+                .map(|s| hermes_core::coerce_bool(&s))
                 .unwrap_or(false),
             allowed_users,
             allow_all_users,

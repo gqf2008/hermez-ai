@@ -877,3 +877,11 @@ mod tests {
         assert_eq!(config["model"]["name"], Value::String("anthropic/claude-opus-4-6".to_string()));
     }
 }
+
+/// Coerce a string value to a boolean.
+///
+/// Recognizes (case-insensitive): `"true"`, `"1"`, `"yes"`, `"on"`.
+/// Everything else returns `false`.
+pub fn coerce_bool(value: &str) -> bool {
+    matches!(value.to_lowercase().trim(), "true" | "1" | "yes" | "on")
+}

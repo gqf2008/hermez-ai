@@ -247,12 +247,7 @@ pub struct DingtalkMessageEvent {
     pub raw: serde_json::Value,
 }
 
-// ── Truncate helper ────────────────────────────────────────────────────────
-
-/// Truncate text to at most `max_chars` characters (UTF-8 safe).
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
+use crate::utils::truncate_text;
 
 // ── Webhook Types ──────────────────────────────────────────────────────────
 
@@ -2045,13 +2040,6 @@ mod tests {
         assert_eq!(event.content, "raw string message");
     }
 
-    #[test]
-    fn test_truncate_text_utf8_safe() {
-        let text = "Hello 😀 World";
-        assert_eq!(truncate_text(text, 3), "Hel");
-        assert_eq!(truncate_text(text, 7), "Hello 😀");
-        assert_eq!(truncate_text(text, 100), text);
-    }
 
     #[test]
     fn test_webhook_signature_verification() {

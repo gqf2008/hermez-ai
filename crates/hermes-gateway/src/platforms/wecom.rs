@@ -29,10 +29,7 @@ use crate::dedup::MessageDeduplicator;
 /// Type alias for pending request/response correlation.
 type PendingResponses = Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>;
 
-/// Truncate text to at most `max_chars` characters (UTF-8 safe).
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
+use crate::utils::truncate_text;
 
 /// WeCom platform configuration.
 #[derive(Debug, Clone)]
@@ -1868,13 +1865,6 @@ mod tests {
         let evt = adapter.handle_inbound(&event).await.unwrap();
         assert_eq!(evt.reply_to_text, Some("this is a reply".to_string()));
         assert_eq!(evt.content, "hello");
-    }
-
-    #[test]
-    fn test_truncate_text() {
-        assert_eq!(truncate_text("hello", 10), "hello");
-        let long = "a".repeat(100);
-        assert_eq!(truncate_text(&long, 10).chars().count(), 10);
     }
 
     #[test]

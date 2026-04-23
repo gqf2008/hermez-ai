@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 
 use hermes_tools::registry::ToolRegistry;
 
-use crate::agent::{AIAgent, AgentConfig};
+use crate::agent::{AIAgent, AgentConfig, ExitReason};
 
 /// Maximum delegation depth. 2 means parent → child only.
 const MAX_DEPTH: u32 = 2;
@@ -36,7 +36,7 @@ const BLOCKED_TOOLS: &[&str] = &[
 pub struct SubagentResult {
     pub goal: String,
     pub response: String,
-    pub exit_reason: String,
+    pub exit_reason: ExitReason,
     pub api_calls: usize,
 }
 
@@ -87,7 +87,7 @@ impl SubagentManager {
             return vec![SubagentResult {
                 goal: String::new(),
                 response: format!("Maximum delegation depth ({MAX_DEPTH}) reached."),
-                exit_reason: "depth_limit".to_string(),
+                exit_reason: ExitReason::DepthLimit,
                 api_calls: 0,
             }];
         }
@@ -120,7 +120,7 @@ impl SubagentManager {
                     or increase delegation.max_concurrent_children in config.yaml.",
                     tasks.len(), max_children
                 ),
-                exit_reason: "too_many_tasks".to_string(),
+                exit_reason: ExitReason::TooManyTasks,
                 api_calls: 0,
             }];
         }
@@ -155,7 +155,7 @@ impl SubagentManager {
                 Err(e) => results.push(SubagentResult {
                     goal: String::new(),
                     response: format!("Child agent panicked: {e}"),
-                    exit_reason: "panic".to_string(),
+                    exit_reason: ExitReason::Panic,
                     api_calls: 0,
                 }),
             }
@@ -242,7 +242,7 @@ async fn run_child_agent(
             return SubagentResult {
                 goal,
                 response: format!("Failed to create child agent: {e}"),
-                exit_reason: "creation_error".to_string(),
+                exit_reason: ExitReason::CreationError,
                 api_calls: 0,
             };
         }
@@ -270,7 +270,7 @@ async fn run_child_agent(
     SubagentResult {
         goal,
         response: turn_result.response,
-        exit_reason: turn_result.exit_reason,
+        exit_reason: turn_result.exit_reason.clone(),
         api_calls: turn_result.api_calls,
     }
 }
@@ -382,7 +382,7 @@ mod tests {
         let args = serde_json::json!({ "goal": "test" });
         let results = mgr.execute_delegation(args, registry).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].exit_reason, "depth_limit");
+        assert_eq!(results[0].exit_reason, ExitReason::DepthLimit);
     }
 
     #[test]
@@ -502,12 +502,12 @@ mod tests {
         let result = SubagentResult {
             goal: "find bugs".to_string(),
             response: "done".to_string(),
-            exit_reason: "completed".to_string(),
+            exit_reason: ExitReason::Completed,
             api_calls: 5,
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("find bugs"));
-        assert!(debug.contains("completed"));
+        assert!(debug.contains("Completed"));
     }
 
     #[test]
@@ -551,7 +551,7 @@ mod tests {
         });
         let results = mgr.execute_delegation(args, registry).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].exit_reason, "too_many_tasks");
+        assert_eq!(results[0].exit_reason, ExitReason::TooManyTasks);
         assert!(results[0].response.contains("4 provided"));
         assert!(results[0].response.contains("max_concurrent_children is 2"));
     }

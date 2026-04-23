@@ -45,6 +45,22 @@ pub async fn run_scheduler(verbose: bool, loop_forever: bool) -> Result<()> {
     Ok(())
 }
 
+/// Execute a single scheduler tick with a fresh JobStore.
+///
+/// Convenience wrapper for external callers (e.g. the gateway) that
+/// don't want to manage a persistent `JobStore`.
+///
+/// Returns the number of jobs executed.
+pub async fn tick_once() -> usize {
+    match JobStore::new() {
+        Ok(mut store) => tick(&mut store, false).await,
+        Err(e) => {
+            tracing::warn!("Cron tick_once: failed to open job store: {e}");
+            0
+        }
+    }
+}
+
 /// Execute a single scheduler tick.
 ///
 /// 1. Acquire file-based lock (skip if already running)
@@ -97,13 +113,26 @@ async fn tick(store: &mut JobStore, _verbose: bool) -> usize {
         } else {
             format!("Cron job '{}' failed:\n{}", job.name, error.as_deref().unwrap_or("unknown error"))
         };
-        let delivery_error = if !delivery_content.is_empty()
+        let mut delivery_error = if !delivery_content.is_empty()
             && delivery_content.trim().to_uppercase().contains("[SILENT]")
         {
             Some("silent".to_string())
         } else {
             None
         };
+
+        // Deliver the result to the configured target (origin, platform, or local)
+        if delivery_error.is_none() && !delivery_content.is_empty() {
+            let target = crate::delivery::resolve_delivery_target(&job.deliver, job.origin.as_ref());
+            if let crate::delivery::DeliveryTarget::Local = target {
+                // local — no delivery needed
+            } else {
+                if let Some(err) = crate::delivery::deliver_result(&target, &job.name, &delivery_content).await {
+                    tracing::warn!("Cron delivery failed for job {}: {err}", job.id);
+                    delivery_error = Some(err);
+                }
+            }
+        }
 
         // Mark job as run
         let _ = store.mark_run(&job_id, success, error.as_deref(), delivery_error.as_deref());
@@ -187,7 +216,7 @@ async fn run_job(job: &crate::jobs::CronJob) -> Result<(bool, String, String, Op
                 if final_response.is_empty() { "(No response generated)" } else { &final_response },
             );
 
-            let success = result.exit_reason == "completed";
+            let success = result.exit_reason == hermes_agent_engine::agent::ExitReason::Completed;
             let error = if success {
                 None
             } else {

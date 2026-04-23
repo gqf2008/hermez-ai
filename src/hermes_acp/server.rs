@@ -633,6 +633,7 @@ async fn run_agent(
         provider_preferences: None,
         session_db: None,
         persist_session: true,
+        ..AgentConfig::default()
     };
 
     let mut registry = ToolRegistry::new();

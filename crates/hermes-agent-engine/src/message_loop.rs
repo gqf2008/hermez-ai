@@ -20,7 +20,7 @@ use hermes_core::Result;
 use hermes_state::SessionDB;
 
 use crate::agent::AIAgent;
-use crate::agent::types::Message;
+use crate::agent::types::{ExitReason, Message};
 
 /// A message from a platform/user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ pub struct MessageMetadata {
     pub message_count: usize,
     pub api_calls: usize,
     pub budget_remaining: usize,
-    pub exit_reason: String,
+    pub exit_reason: ExitReason,
 }
 
 /// Manages a conversation session across multiple platform messages.
@@ -104,7 +104,7 @@ impl MessageLoop {
                     message_count: self.messages.len(),
                     api_calls: 0,
                     budget_remaining: 0,
-                    exit_reason: "interrupted".to_string(),
+                    exit_reason: ExitReason::Interrupted,
                 },
             });
         }
@@ -144,7 +144,7 @@ impl MessageLoop {
 
         Ok(MessageResult {
             response: turn_result.response.clone(),
-            waiting_for_user: turn_result.exit_reason == "completed",
+            waiting_for_user: turn_result.exit_reason == ExitReason::Completed,
             metadata: MessageMetadata {
                 session_id: self.session_id.clone(),
                 message_count: self.messages.len(),
@@ -249,7 +249,7 @@ mod tests {
             timestamp: 0,
         };
         let result = loop_.process_message(msg).await.unwrap();
-        assert_eq!(result.metadata.exit_reason, "interrupted");
+        assert_eq!(result.metadata.exit_reason, ExitReason::Interrupted);
         assert_eq!(result.response, "Conversation interrupted.");
     }
 }

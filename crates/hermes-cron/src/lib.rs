@@ -10,4 +10,4 @@ pub mod scheduler;
 
 pub use delivery::{DeliveryTarget, deliver_result, resolve_delivery_target};
 pub use jobs::{CronJob, JobStore, JobUpdates, parse_schedule, compute_next_run, save_job_output};
-pub use scheduler::{run_scheduler, trigger_job};
+pub use scheduler::{run_scheduler, tick_once, trigger_job};

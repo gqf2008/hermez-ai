@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::dedup::MessageDeduplicator;
+use crate::utils::truncate_text;
 
 /// Feishu webhook max body size (2MB, matches Python).
 const FEISHU_WEBHOOK_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -39,6 +40,9 @@ const FALLBACK_INTERACTIVE_TEXT: &str = "[Interactive card]";
 const FEISHU_DEDUP_TTL_SECONDS: u64 = 24 * 60 * 60;
 /// 10-minute sender-name cache TTL.
 const FEISHU_SENDER_NAME_TTL_SECONDS: u64 = 10 * 60;
+/// 10-minute stream-state TTL — stale states are cleaned up to prevent
+/// unbounded memory growth when a stream is abandoned without finalization.
+const FEISHU_STREAM_STATE_TTL_SECONDS: u64 = 10 * 60;
 /// Max text document size to inject inline (1 MB).
 const MAX_TEXT_INJECT_BYTES: u64 = 1024 * 1024;
 
@@ -174,7 +178,56 @@ pub struct FeishuConfig {
     pub bot_open_id: String,
     pub bot_user_id: String,
     pub bot_name: String,
+    /// Whether to enable streaming reply mode (progressive edit_message updates).
+    pub stream_mode: bool,
 }
+
+/// Cached Feishu credentials read once from `~/.hermes/config.yaml`.
+/// Avoids repeated disk I/O when `FeishuConfig::from_env()` is called frequently.
+static FEISHU_CONFIG_CACHE: std::sync::LazyLock<(String, String, String, String)> =
+    std::sync::LazyLock::new(|| {
+        let path = hermes_core::get_hermes_home().join("config.yaml");
+        let default = || (String::new(), String::new(), String::new(), String::new());
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read Feishu config from {:?}: {}", path, e);
+                return default();
+            }
+        };
+        let config: Value = match serde_yaml::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to parse Feishu config YAML: {}", e);
+                return default();
+            }
+        };
+        let extra = config
+            .get("platforms")
+            .and_then(|p| p.get("feishu"))
+            .and_then(|f| f.get("extra"));
+        let app_id = extra
+            .and_then(|e| e.get("app_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let app_secret = extra
+            .and_then(|e| e.get("app_secret"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let encrypt_key = extra
+            .and_then(|e| e.get("encrypt_key"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let verification_token = extra
+            .and_then(|e| e.get("verification_token"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        (app_id, app_secret, encrypt_key, verification_token)
+    });
 
 impl FeishuConfig {
     pub fn from_env() -> Self {
@@ -237,12 +290,20 @@ impl FeishuConfig {
             }
         }
 
+        // Fallback to cached config file values if env vars are not set
+        let (cfg_app_id, cfg_app_secret, cfg_encrypt_key, cfg_verification_token) =
+            FEISHU_CONFIG_CACHE.clone();
+
         Self {
-            app_id: std::env::var("FEISHU_APP_ID").unwrap_or_default(),
-            app_secret: std::env::var("FEISHU_APP_SECRET").unwrap_or_default(),
+            app_id: std::env::var("FEISHU_APP_ID")
+                .unwrap_or_else(|_| cfg_app_id),
+            app_secret: std::env::var("FEISHU_APP_SECRET")
+                .unwrap_or_else(|_| cfg_app_secret),
             connection_mode: FeishuConnectionMode::default(),
-            verification_token: std::env::var("FEISHU_VERIFICATION_TOKEN").unwrap_or_default(),
-            encrypt_key: std::env::var("FEISHU_ENCRYPT_KEY").unwrap_or_default(),
+            verification_token: std::env::var("FEISHU_VERIFICATION_TOKEN")
+                .unwrap_or_else(|_| cfg_verification_token),
+            encrypt_key: std::env::var("FEISHU_ENCRYPT_KEY")
+                .unwrap_or_else(|_| cfg_encrypt_key),
             group_policy: GroupPolicy::default(),
             allowed_users,
             webhook_port: std::env::var("FEISHU_WEBHOOK_PORT")
@@ -257,6 +318,10 @@ impl FeishuConfig {
             bot_open_id: std::env::var("FEISHU_BOT_OPEN_ID").unwrap_or_default(),
             bot_user_id: std::env::var("FEISHU_BOT_USER_ID").unwrap_or_default(),
             bot_name: std::env::var("FEISHU_BOT_NAME").unwrap_or_default(),
+            stream_mode: std::env::var("FEISHU_STREAM_MODE")
+                .ok()
+                .map(|v| hermes_core::coerce_bool(&v))
+                .unwrap_or(false),
         }
     }
 }
@@ -272,7 +337,7 @@ struct CachedToken {
 pub struct PersistentDedup {
     path: std::path::PathBuf,
     entries: parking_lot::Mutex<std::collections::HashMap<String, f64>>,
-    order: parking_lot::Mutex<Vec<String>>,
+    order: parking_lot::Mutex<std::collections::VecDeque<String>>,
     max_size: usize,
     ttl_secs: u64,
 }
@@ -281,7 +346,7 @@ impl PersistentDedup {
     pub fn new(max_size: usize, ttl_secs: u64) -> Self {
         let path = hermes_core::get_hermes_home().join("feishu_seen_message_ids.json");
         let mut entries = std::collections::HashMap::new();
-        let mut order = Vec::new();
+        let mut order = std::collections::VecDeque::new();
 
         // Load existing state
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -312,7 +377,7 @@ impl PersistentDedup {
                 for (msg_id, ts) in loaded {
                     if ts == 0.0 || ttl_secs == 0 || now - ts < ttl_secs as f64 {
                         entries.insert(msg_id.clone(), ts);
-                        order.push(msg_id);
+                        order.push_back(msg_id);
                     }
                 }
             }
@@ -363,12 +428,11 @@ impl PersistentDedup {
 
         // Record new
         entries.insert(key.to_string(), now);
-        order.push(key.to_string());
+        order.push_back(key.to_string());
 
         // Evict oldest if over max size
         while order.len() > self.max_size {
-            if let Some(stale) = order.first().cloned() {
-                order.remove(0);
+            if let Some(stale) = order.pop_front() {
                 entries.remove(&stale);
             }
         }
@@ -480,7 +544,7 @@ fn to_boolean(value: Option<&Value>) -> bool {
     match value {
         Some(Value::Bool(true)) => true,
         Some(Value::Number(n)) => n.as_i64() == Some(1),
-        Some(Value::String(s)) => s == "true",
+        Some(Value::String(s)) => hermes_core::coerce_bool(s),
         _ => false,
     }
 }
@@ -1270,6 +1334,47 @@ pub struct ApprovalState {
     pub chat_id: String,
 }
 
+/// Per-chat streaming state for progressive message updates.
+struct FeishuStreamState {
+    /// The real Feishu message_id of the initial placeholder message.
+    message_id: String,
+    /// Accumulated reasoning/thinking text.
+    reasoning: String,
+    /// Current tool call name (for display).
+    current_tool: Option<String>,
+    /// Accumulated final content text.
+    content: String,
+    /// Animation tick counter.
+    tick: u64,
+    /// Last time we called edit_message (for throttling).
+    last_edit_time: std::time::Instant,
+    /// Last content sent via edit_message (to avoid redundant calls).
+    last_sent_content: String,
+}
+
+/// Events sent from sync callbacks to the async flush task.
+#[derive(Debug)]
+pub enum FeishuStreamEvent {
+    ContentDelta { chat_id: String, delta: String },
+    ReasoningDelta { chat_id: String, delta: String },
+    ToolStarted { chat_id: String, tool_name: String },
+}
+
+impl FeishuStreamEvent {
+    pub fn chat_id(&self) -> &str {
+        match self {
+            FeishuStreamEvent::ContentDelta { chat_id, .. } => chat_id,
+            FeishuStreamEvent::ReasoningDelta { chat_id, .. } => chat_id,
+            FeishuStreamEvent::ToolStarted { chat_id, .. } => chat_id,
+        }
+    }
+}
+
+/// Minimum interval between edit_message calls during streaming (ms).
+const STREAM_EDIT_INTERVAL_MS: u64 = 800;
+/// Maximum text length for a Feishu message (approximate, for truncation).
+const MAX_STREAM_DISPLAY_LENGTH: usize = 4000;
+
 /// Feishu platform adapter.
 #[derive(Clone)]
 pub struct FeishuAdapter {
@@ -1301,6 +1406,8 @@ pub struct FeishuAdapter {
     pub message_handler: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::runner::MessageHandler>>>>,
     /// Gateway-level approval registry for resolving pending approvals.
     approval_registry: crate::runner::ApprovalRegistry,
+    /// Per-chat streaming state for progressive message updates.
+    stream_states: Arc<tokio::sync::Mutex<std::collections::HashMap<String, FeishuStreamState>>>,
 }
 
 impl FeishuAdapter {
@@ -1336,8 +1443,203 @@ impl FeishuAdapter {
             message_handler: Arc::new(tokio::sync::Mutex::new(None)),
             approval_registry,
             config,
+            stream_states: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
+
+    // ── Streaming reply methods ──────────────────────────────────────────
+
+    /// Build an interactive card payload for streaming display.
+    fn build_stream_card(text: &str) -> Value {
+        serde_json::json!({
+            "config": {"wide_screen_mode": true},
+            "elements": [
+                {"tag": "markdown", "content": text}
+            ]
+        })
+    }
+
+    /// Remove stream states whose last edit is older than the TTL.
+    fn cleanup_stream_states(&self, states: &mut std::collections::HashMap<String, FeishuStreamState>) {
+        let ttl = std::time::Duration::from_secs(FEISHU_STREAM_STATE_TTL_SECONDS);
+        let now = std::time::Instant::now();
+        states.retain(|_, s| now.duration_since(s.last_edit_time) < ttl);
+    }
+
+    /// Start a streaming reply: send a placeholder card message and register state.
+    pub async fn start_stream_reply(&self, chat_id: &str) -> Result<String, String> {
+        let placeholder = ".";
+        let card = Self::build_stream_card(placeholder);
+        let message_id = self.send_message(chat_id, "interactive", &card).await?;
+        let state = FeishuStreamState {
+            message_id: message_id.clone(),
+            reasoning: String::new(),
+            current_tool: None,
+            content: String::new(),
+            tick: 0,
+            last_edit_time: std::time::Instant::now()
+                - std::time::Duration::from_millis(STREAM_EDIT_INTERVAL_MS),
+            last_sent_content: placeholder.to_string(),
+        };
+        let mut states = self.stream_states.lock().await;
+        self.cleanup_stream_states(&mut states);
+        states.insert(chat_id.to_string(), state);
+        Ok(message_id)
+    }
+
+    /// Push a reasoning delta into the stream state.
+    pub async fn push_reasoning_delta(&self, chat_id: &str, delta: &str) {
+        let mut states = self.stream_states.lock().await;
+        if let Some(state) = states.get_mut(chat_id) {
+            state.reasoning.push_str(delta);
+        }
+    }
+
+    /// Push a text/content delta into the stream state.
+    pub async fn push_content_delta(&self, chat_id: &str, delta: &str) {
+        let mut states = self.stream_states.lock().await;
+        if let Some(state) = states.get_mut(chat_id) {
+            state.content.push_str(delta);
+        }
+    }
+
+    /// Push a tool call name into the stream state.
+    pub async fn push_tool_started(&self, chat_id: &str, tool_name: &str) {
+        let mut states = self.stream_states.lock().await;
+        if let Some(state) = states.get_mut(chat_id) {
+            state.current_tool = Some(tool_name.to_string());
+        }
+    }
+
+    /// Build display text from the current stream state.
+    fn build_stream_display(&self, state: &FeishuStreamState) -> String {
+        let mut display = String::new();
+
+        if !state.reasoning.is_empty() {
+            let char_count = state.reasoning.chars().count();
+            let preview = truncate_text(&state.reasoning, 400);
+            display.push_str("💭 ");
+            display.push_str(&preview);
+            if char_count > 400 {
+                display.push_str("...");
+            }
+        }
+
+        if let Some(ref tool) = state.current_tool {
+            if !display.is_empty() {
+                display.push('\n');
+            }
+            display.push_str(&format!("🔧 Using tool: {}...", tool));
+        }
+
+        if !state.content.is_empty() {
+            if !display.is_empty() {
+                display.push_str("\n\n");
+            }
+            display.push_str(&state.content);
+        }
+
+        // If nothing to show yet, show a cycling animation
+        if display.is_empty() {
+            let dots = [".", "..", "...", "...."];
+            display.push_str(dots[(state.tick as usize) % dots.len()]);
+        }
+
+        let char_count = display.chars().count();
+        if char_count > MAX_STREAM_DISPLAY_LENGTH {
+            display = truncate_text(&display, MAX_STREAM_DISPLAY_LENGTH);
+            display.push_str("\n...(truncated)");
+        }
+
+        display
+    }
+
+    /// Flush a pending edit to Feishu if enough time has elapsed.
+    pub async fn flush_stream_edit(&self, chat_id: &str) -> Result<(), String> {
+        let mut states = self.stream_states.lock().await;
+        self.cleanup_stream_states(&mut states);
+        let state = match states.get_mut(chat_id) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        if state.last_edit_time.elapsed() < std::time::Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
+            return Ok(());
+        }
+
+        let text_display = self.build_stream_display(state);
+        if text_display == state.last_sent_content {
+            return Ok(());
+        }
+
+        let message_id = state.message_id.clone();
+
+        // Increment tick for animation cycling
+        state.tick += 1;
+
+        // Drop lock before async call
+        drop(states);
+
+        let card = Self::build_stream_card(&text_display);
+        tracing::info!("Feishu flush_stream_edit: chat_id={} text={}", chat_id, text_display);
+        match self.edit_message(&message_id, &card, "interactive").await {
+            Ok(_) => {
+                let mut states = self.stream_states.lock().await;
+                if let Some(state) = states.get_mut(chat_id) {
+                    state.last_edit_time = std::time::Instant::now();
+                    state.last_sent_content = text_display;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("Feishu stream edit failed: {e}");
+                Ok(())
+            }
+        }
+    }
+
+    /// Finalize the streaming reply: edit with final content (thinking stripped) and clean up.
+    pub async fn finalize_stream_reply(&self, chat_id: &str, final_text: &str) -> Result<(), String> {
+        let mut states = self.stream_states.lock().await;
+        let state = match states.remove(chat_id) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let filtered = hermes_core::strip_think_blocks(final_text);
+        let display = if filtered.trim().is_empty() {
+            "Reply complete."
+        } else {
+            &filtered
+        };
+
+        // Drop lock before async call
+        drop(states);
+
+        let card = Self::build_stream_card(display);
+        self.edit_message(&state.message_id, &card, "interactive")
+            .await
+            .map(|_| ())
+    }
+
+    /// Finalize the streaming reply with an error message.
+    /// Returns Ok(()) whether or not a stream was active.
+    pub async fn finalize_stream_with_error(&self, chat_id: &str, error_msg: &str) -> Result<(), String> {
+        let mut states = self.stream_states.lock().await;
+        let state = match states.remove(chat_id) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let message_id = state.message_id;
+        drop(states);
+
+        let card = Self::build_stream_card(error_msg);
+        self.edit_message(&message_id, &card, "interactive")
+            .await
+            .map(|_| ())
+    }
+
+    // ── Token / Auth ─────────────────────────────────────────────────────
 
     async fn get_access_token(&self) -> Result<String, String> {
         {
@@ -1383,7 +1685,7 @@ impl FeishuAdapter {
     /// Send a text message to a Feishu chat.
     pub async fn send_text(&self, chat_id: &str, text: &str) -> Result<String, String> {
         let token = self.get_access_token().await?;
-        let msg_id = format!("msg_{}", Uuid::new_v4().simple());
+        let fallback_id = format!("msg_{}", Uuid::new_v4().simple());
 
         let resp = self
             .client
@@ -1404,7 +1706,9 @@ impl FeishuAdapter {
             return Err(format!("Send failed: HTTP {}", status));
         }
 
-        debug!("Feishu message sent to {chat_id}: msg_id={msg_id}");
+        let body: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+        let msg_id = parse_message_id(&body, &fallback_id);
+        tracing::info!("Feishu send_text response: msg_id={}", msg_id);
         Ok(msg_id)
     }
 
@@ -1416,7 +1720,7 @@ impl FeishuAdapter {
         content: &Value,
     ) -> Result<String, String> {
         let token = self.get_access_token().await?;
-        let msg_id = format!("msg_{}", Uuid::new_v4().simple());
+        let fallback_id = format!("msg_{}", Uuid::new_v4().simple());
 
         let resp = self
             .client
@@ -1437,7 +1741,9 @@ impl FeishuAdapter {
             return Err(format!("Send failed: HTTP {}", status));
         }
 
-        debug!("Feishu {msg_type} message sent to {chat_id}: msg_id={msg_id}");
+        let body: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+        let msg_id = parse_message_id(&body, &fallback_id);
+        debug!("Feishu {msg_type} message sent to {chat_id}: message_id={msg_id}");
         Ok(msg_id)
     }
 
@@ -1759,7 +2065,9 @@ impl FeishuAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("Edit failed: HTTP {}", status));
+            let body_text = resp.text().await.unwrap_or_default();
+            tracing::warn!("Feishu edit_message failed: HTTP {} body={}", status, body_text);
+            return Err(format!("Edit failed: HTTP {} body={}", status, body_text));
         }
 
         debug!("Feishu message {message_id} edited");
@@ -2109,7 +2417,7 @@ impl FeishuAdapter {
                     }
 
                     // Best-effort ACK reaction
-                    let adapter = self.clone_for_webhook();
+                    let adapter = self.clone();
                     tokio::spawn(async move {
                         adapter.add_ack_reaction(&msg_id).await;
                     });
@@ -2169,7 +2477,7 @@ impl FeishuAdapter {
                             .map(|(_, v)| *v)
                             .unwrap_or("deny");
 
-                        let adapter = self.clone_for_webhook();
+                        let adapter = self.clone();
                         let open_id_for_spawn = open_id.clone();
                         tokio::spawn(async move {
                             adapter.resolve_approval(approval_id, choice, &open_id_for_spawn).await;
@@ -2305,7 +2613,7 @@ impl FeishuAdapter {
     /// the same normalization, dedup, and policy pipeline as webhooks.
     pub async fn run_ws(&self) {
         let ws_client = crate::platforms::feishu_ws::FeishuWsClient::new(self.config.clone());
-        let adapter = self.clone_for_webhook();
+        let adapter = self.clone();
         let callback = Arc::new(move |event: Value| {
             let adapter = adapter.clone();
             tokio::spawn(async move {
@@ -2430,7 +2738,7 @@ impl FeishuAdapter {
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
         let path = self.config.webhook_path.clone();
-        let adapter = Arc::new(self.clone_for_webhook());
+        let adapter = Arc::new(self.clone());
 
         let app = Router::new()
             .route(&path, axum::routing::post(move |headers: HeaderMap, body: Bytes| {
@@ -2453,27 +2761,6 @@ impl FeishuAdapter {
             })
             .await
             .map_err(|e| format!("Feishu webhook server error: {e}"))
-    }
-
-    /// Clone the adapter for webhook server use (shares state via Arc).
-    fn clone_for_webhook(&self) -> FeishuAdapter {
-        FeishuAdapter {
-            config: self.config.clone(),
-            client: self.client.clone(),
-            dedup: self.dedup.clone(),
-            persistent_dedup: self.persistent_dedup.clone(),
-            sender_name_cache: self.sender_name_cache.clone(),
-            access_token: self.access_token.clone(),
-            on_message: self.on_message.clone(),
-            on_card_action: self.on_card_action.clone(),
-            text_batches: self.text_batches.clone(),
-            batch_timers: self.batch_timers.clone(),
-            approval_state: self.approval_state.clone(),
-            approval_counter: self.approval_counter.clone(),
-            card_action_dedup: self.card_action_dedup.clone(),
-            message_handler: self.message_handler.clone(),
-            approval_registry: self.approval_registry.clone(),
-        }
     }
 
     /// Handle a single webhook request.
@@ -2613,7 +2900,7 @@ impl FeishuAdapter {
                     }
 
                     // Best-effort ACK reaction (fire-and-forget)
-                    let adapter = self.clone_for_webhook();
+                    let adapter = self.clone();
                     tokio::spawn(async move {
                         adapter.add_ack_reaction(&msg_id).await;
                     });
@@ -2679,7 +2966,7 @@ impl FeishuAdapter {
                             .unwrap_or("deny");
 
                         // Resolve approval asynchronously
-                        let adapter = self.clone_for_webhook();
+                        let adapter = self.clone();
                         let open_id_for_spawn = open_id.clone();
                         tokio::spawn(async move {
                             adapter.resolve_approval(approval_id, choice, &open_id_for_spawn).await;
@@ -2807,6 +3094,16 @@ impl FeishuAdapter {
     }
 }
 
+/// Parse message_id from a Feishu API response body.
+fn parse_message_id(body: &Value, fallback: &str) -> String {
+    body.get("data")
+        .and_then(|d| d.get("message_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+
 /// Check if text contains simple markdown markers.
 ///
 /// Only counts markers at the start of a line (headings, lists, quotes)
@@ -2902,7 +3199,10 @@ mod tests {
 
     #[test]
     fn test_not_configured_when_empty() {
-        let config = FeishuConfig::from_env();
+        let mut config = FeishuConfig::from_env();
+        // Clear credentials so the test is independent of env/config-file state.
+        config.app_id.clear();
+        config.app_secret.clear();
         let adapter = FeishuAdapter::new(config, crate::runner::ApprovalRegistry::new());
         assert!(!adapter.is_configured());
     }
