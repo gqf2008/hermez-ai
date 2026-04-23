@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 /// Stale-session timeout: sessions older than this are auto-cleaned (seconds).
 const STALE_SESSION_TIMEOUT_SECS: f64 = 300.0;
+const BUSY_ACK_DEBOUNCE_SECONDS: f64 = 30.0;
 
 /// Registry for pending user approvals (gateway-level blocking).
 ///
@@ -775,7 +776,7 @@ impl GatewayRunner {
                                 let should_ack = {
                                     let mut ack_map = busy_ack_ts.lock();
                                     let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-                                    if now - last_ack < 30.0 {
+                                    if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                                         false
                                     } else {
                                         ack_map.insert(chat_id.to_string(), now);
@@ -936,7 +937,7 @@ impl GatewayRunner {
                                             let should_ack = {
                                                 let mut ack_map = busy_ack_ts.lock();
                                                 let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-                                                if now - last_ack < 30.0 {
+                                                if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                                                     false
                                                 } else {
                                                     ack_map.insert(chat_id.to_string(), now);
@@ -1119,7 +1120,7 @@ impl GatewayRunner {
                                             let should_ack = {
                                                 let mut ack_map = busy_ack_ts.lock();
                                                 let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-                                                if now - last_ack < 30.0 {
+                                                if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                                                     false
                                                 } else {
                                                     ack_map.insert(chat_id.to_string(), now);
@@ -2016,7 +2017,7 @@ async fn route_weixin_message(
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-            if now - last_ack < 30.0 {
+            if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                 false // Debounced
             } else {
                 ack_map.insert(chat_id.to_string(), now);
@@ -2227,7 +2228,7 @@ async fn route_telegram_message(
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-            if now - last_ack < 30.0 {
+            if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                 false
             } else {
                 ack_map.insert(chat_id.to_string(), now);
@@ -2674,7 +2675,7 @@ async fn route_whatsapp_message(
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-            if now - last_ack < 30.0 {
+            if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                 false
             } else {
                 ack_map.insert(chat_id.to_string(), now);
@@ -2877,7 +2878,7 @@ async fn route_email_message(
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-            if now - last_ack < 30.0 {
+            if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                 false
             } else {
                 ack_map.insert(chat_id.to_string(), now);
@@ -3086,7 +3087,7 @@ async fn route_qqbot_message(
         let should_ack = {
             let mut ack_map = busy_ack_ts.lock();
             let last_ack = ack_map.get(chat_id).copied().unwrap_or(0.0);
-            if now - last_ack < 30.0 {
+            if now - last_ack < BUSY_ACK_DEBOUNCE_SECONDS {
                 false
             } else {
                 ack_map.insert(chat_id.to_string(), now);

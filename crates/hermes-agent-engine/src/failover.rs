@@ -91,36 +91,13 @@ pub fn strip_reasoning_from_messages(messages: &mut [Message]) {
             obj.remove("reasoning_details");
             // Strip inline tags from content
             if let Some(content) = obj.get("content").and_then(Value::as_str) {
-                let cleaned = strip_inline_reasoning(content);
+                let cleaned = hermes_core::strip_think_blocks(content);
                 if let Some(content_val) = obj.get_mut("content") {
                     *content_val = Value::String(cleaned);
                 }
             }
         }
     }
-}
-
-fn strip_inline_reasoning(content: &str) -> String {
-    let patterns = [
-        ("<think>", "</think>"),
-        ("<thinking>", "</thinking>"),
-        ("<thought>", "</thought>"),
-        ("<reasoning>", "</reasoning>"),
-        ("<REASONING_SCRATCHPAD>", "</REASONING_SCRATCHPAD>"),
-    ];
-
-    let mut result = content.to_string();
-    for &(open, close) in &patterns {
-        while let Some(start) = result.find(open) {
-            if let Some(end) = result[start..].find(close) {
-                let end = start + end + close.len();
-                result.replace_range(start..end, "");
-            } else {
-                break;
-            }
-        }
-    }
-    result
 }
 
 /// Apply the failover chain for an LLM error.
@@ -299,14 +276,14 @@ mod tests {
     #[test]
     fn test_strip_inline_reasoning_tags() {
         let input = "<think>Secret thinking</think>Hello!";
-        let result = strip_inline_reasoning(input);
+        let result = hermes_core::strip_think_blocks(input);
         assert_eq!(result, "Hello!");
     }
 
     #[test]
     fn test_strip_thinking_tags() {
         let input = "<thinking>Internal reasoning</thinking>Answer: 42";
-        let result = strip_inline_reasoning(input);
+        let result = hermes_core::strip_think_blocks(input);
         assert_eq!(result, "Answer: 42");
     }
 

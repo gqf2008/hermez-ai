@@ -22,6 +22,7 @@ use axum::{
     routing::post,
 };
 use crate::platforms::telegram_network::{parse_fallback_ip_env, TelegramFallbackClient};
+use crate::utils::truncate_text;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1078,7 +1079,7 @@ impl TelegramAdapter {
                 }
                 // Message too long — truncate and retry without markdown
                 if err_lower.contains("message_too_long") || err_lower.contains("too long") {
-                    let truncated = prefix_within_limit(text, MAX_MESSAGE_LENGTH - 20);
+                    let truncated = truncate_text(text, MAX_MESSAGE_LENGTH - 20);
                     let mut body2 = serde_json::json!({
                         "chat_id": chat_id,
                         "message_id": message_id.parse::<i64>().map_err(|_| "invalid message_id")?,
@@ -1282,14 +1283,6 @@ pub fn strip_mdv2(text: &str) -> String {
     result
 }
 
-/// Truncate text to fit within a character limit (Unicode-safe).
-fn prefix_within_limit(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    text.chars().take(limit).collect()
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1331,12 +1324,6 @@ mod tests {
         // This just tests Default without env vars
         let cfg = TelegramConfig::default();
         assert_eq!(cfg.bot_token, std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default());
-    }
-
-    #[test]
-    fn test_prefix_within_limit() {
-        assert_eq!(prefix_within_limit("hello", 10), "hello");
-        assert_eq!(prefix_within_limit("hello world", 5), "hello");
     }
 
     #[test]

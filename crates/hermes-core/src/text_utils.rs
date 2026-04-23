@@ -26,7 +26,7 @@ pub fn strip_think_blocks(content: &str) -> String {
         // <think>...</think>
         if rest.starts_with("<think>") {
             if let Some(end) = rest.find("</think>") {
-                i += end + 9;
+                i += end + 8;
                 continue;
             } else {
                 break;

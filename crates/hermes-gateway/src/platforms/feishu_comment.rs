@@ -18,6 +18,7 @@
 //!      Whole -> add_whole_comment
 //!      Local -> reply_to_comment (fallback to add_whole_comment on 1069302)
 
+use crate::utils::truncate_text_with_suffix;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -988,14 +989,6 @@ fn _format_referenced_docs(
 
 // ── Prompt construction ────────────────────────────────────────────────────
 
-fn _truncate(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        text.to_string()
-    } else {
-        format!("{}...", &text[..limit])
-    }
-}
-
 /// Select up to `LOCAL_TIMELINE_LIMIT` entries centered on target_index.
 fn _select_local_timeline(
     timeline: &[(String, String, bool)],
@@ -1096,9 +1089,9 @@ pub fn build_local_comment_prompt(
     let selected = _select_local_timeline(timeline, target_index);
     let mut lines = vec![
         format!(r#"The user added a reply in "{doc_title}"."#),
-        format!(r#"Current user comment text: "{}""#, _truncate(target_reply_text, PROMPT_TEXT_LIMIT)),
-        format!(r#"Original comment text: "{}""#, _truncate(root_comment_text, PROMPT_TEXT_LIMIT)),
-        format!(r#"Quoted content: "{}""#, _truncate(quote_text, 500)),
+        format!(r#"Current user comment text: "{}""#, truncate_text_with_suffix(target_reply_text, PROMPT_TEXT_LIMIT, "...")),
+        format!(r#"Original comment text: "{}""#, truncate_text_with_suffix(root_comment_text, PROMPT_TEXT_LIMIT, "...")),
+        format!(r#"Quoted content: "{}""#, truncate_text_with_suffix(quote_text, 500, "...")),
         "This comment mentioned you (@mention is for routing, not task content).".to_string(),
         format!("Document link: {doc_url}"),
         "Current commented document:".to_string(),
@@ -1118,7 +1111,7 @@ pub fn build_local_comment_prompt(
         lines.push(format!(
             "[{}] {}{marker}",
             user_id,
-            _truncate(text, PROMPT_TEXT_LIMIT)
+            truncate_text_with_suffix(text, PROMPT_TEXT_LIMIT, "...")
         ));
     }
 
@@ -1147,7 +1140,7 @@ pub fn build_whole_comment_prompt(
     let selected = _select_whole_timeline(timeline, current_index, nearest_self_index);
     let mut lines = vec![
         format!(r#"The user added a comment in "{doc_title}"."#),
-        format!(r#"Current user comment text: "{}""#, _truncate(comment_text, PROMPT_TEXT_LIMIT)),
+        format!(r#"Current user comment text: "{}""#, truncate_text_with_suffix(comment_text, PROMPT_TEXT_LIMIT, "...")),
         "This is a whole-document comment.".to_string(),
         "This comment mentioned you (@mention is for routing, not task content).".to_string(),
         format!("Document link: {doc_url}"),
@@ -1167,7 +1160,7 @@ pub fn build_whole_comment_prompt(
         lines.push(format!(
             "[{}] {}{marker}",
             user_id,
-            _truncate(text, PROMPT_TEXT_LIMIT)
+            truncate_text_with_suffix(text, PROMPT_TEXT_LIMIT, "...")
         ));
     }
 
@@ -1658,9 +1651,9 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate() {
-        assert_eq!(_truncate("short", 10), "short");
-        assert_eq!(_truncate("1234567890abcdef", 10), "1234567890...");
+    fn test_truncate_with_suffix() {
+        assert_eq!(truncate_text_with_suffix("short", 10, "..."), "short");
+        assert_eq!(truncate_text_with_suffix("1234567890abcdef", 10, "..."), "1234567...");
     }
 
     #[test]
