@@ -313,7 +313,7 @@ Type these during an interactive chat session.
 ```
 ~/.hermez/config.yaml       Main configuration
 ~/.hermez/.env              API keys and secrets
-$HERMES_HOME/skills/        Installed skills
+$HERMEZ_HOME/skills/        Installed skills
 ~/.hermez/sessions/         Session transcripts
 ~/.hermez/logs/             Gateway and error logs
 ~/.hermez/auth.json         OAuth tokens and credential pools
@@ -654,7 +654,7 @@ registry.register(
 
 Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual list needed.
 
-All handlers must return JSON strings. Use `get_hermez_home()` for paths, never hardcode `~/.hermes`.
+All handlers must return JSON strings. Use `get_hermez_home()` for paths, never hardcode `~/.hermez`.
 
 ### Adding a Slash Command
 
@@ -683,7 +683,7 @@ python -m pytest tests/ -o 'addopts=' -q   # Full suite
 python -m pytest tests/tools/ -q            # Specific area
 ```
 
-- Tests auto-redirect `HERMES_HOME` to temp dirs — never touch real `~/.hermez/`
+- Tests auto-redirect `HERMEZ_HOME` to temp dirs — never touch real `~/.hermez/`
 - Run full suite before pushing any change
 - Use `-o 'addopts='` to clear any baked-in pytest flags
 

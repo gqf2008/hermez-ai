@@ -6,7 +6,7 @@
 //! memory, sessions, skills, cron, and gateway state.
 //!
 //! Profiles live under `~/.hermez/profiles/<name>/`. The "default" profile
-//! is `~/.hermes` itself (backward compatible, zero migration needed).
+//! is `~/.hermez` itself (hermez home directory).
 
 use std::fs;
 use std::io::{self, Write};
@@ -511,7 +511,7 @@ pub fn cmd_profile_create(
     // Validate name
     validate_profile_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
     if name == "default" {
-        anyhow::bail!("Cannot create a profile named 'default' — it is the built-in profile (~/.hermes).");
+        anyhow::bail!("Cannot create a profile named 'default' — it is the built-in profile (~/.hermez).");
     }
 
     let profile_dir = get_profile_dir(name);
@@ -627,7 +627,7 @@ pub fn cmd_profile_delete(name: &str, force: bool) -> anyhow::Result<()> {
 
     if name == "default" {
         anyhow::bail!(
-            "Cannot delete the default profile (~/.hermes).\n\
+            "Cannot delete the default profile (~/.hermez).\n\
              To remove everything, use: hermez uninstall"
         );
     }
@@ -1103,7 +1103,7 @@ pub fn cmd_profile_import(path: &str, name: Option<&str>) -> anyhow::Result<()> 
 
     if profile_name == "default" {
         anyhow::bail!(
-            "Cannot import as 'default' — that is the built-in root profile (~/.hermes). \
+            "Cannot import as 'default' — that is the built-in root profile (~/.hermez). \
              Specify a different name."
         );
     }

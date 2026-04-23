@@ -137,7 +137,7 @@ actual = str(n.width) + 'x' + str(n.height)
 
 ### Config location
 
-`$HERMES_HOME/config.yaml` (defaults to `~/.hermez/config.yaml` when `HERMES_HOME` is unset)
+`$HERMEZ_HOME/config.yaml` (defaults to `~/.hermez/config.yaml` when `HERMEZ_HOME` is unset)
 
 ### MCP entry format
 

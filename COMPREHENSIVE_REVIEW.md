@@ -213,7 +213,7 @@ These are acknowledged gaps, not bugs:
 - ~2,039 tests passing
 - No coverage tooling configured (`cargo-tarpaulin` or `llvm-cov`)
 - Some tests are integration-style (spawn subcommands, test CLI flows)
-- Test isolation via `_isolate_hermez_home` autouse fixture (redirects `HERMES_HOME` to temp dir)
+- Test isolation via `_isolate_hermez_home` autouse fixture (redirects `HERMEZ_HOME` to temp dir)
 
 ### Clippy
 
@@ -254,7 +254,7 @@ These are acknowledged gaps, not bugs:
 - **Clean crate separation**: Core → LLM → Tools → Agent → Gateway → CLI is a sensible dependency graph
 - **Registry pattern for tools**: `tools/registry.rs` is a good design — tools self-register at import time
 - **Prompt caching awareness**: Code explicitly avoids cache-breaking context changes mid-conversation
-- **Profile support**: Multi-instance via `HERMES_HOME` env var is well-implemented
+- **Profile support**: Multi-instance via `HERMEZ_HOME` env var is well-implemented
 - **Skin engine**: Data-driven theming is a nice UX touch
 
 ### Concerns

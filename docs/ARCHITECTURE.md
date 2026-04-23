@@ -126,7 +126,7 @@
 |  │  │  HermesConfig (load/save, defaults, env vars)        │   │      |
 |  │  │  HermesError + ErrorCategory                          │   │      |
 |  │  │  Result<T> type alias                                 │   │      |
-|  │  │  Constants (HERMES_HOME, version, etc.)               │   │      |
+|  │  │  Constants (HERMEZ_HOME, version, etc.)               │   │      |
 |  │  └──────────────────────────────────────────────────────┘   │      |
 |  └─────────────────────────────────────────────────────────────┘      |
 |                                                                        |

@@ -241,7 +241,7 @@ When adding a new CLI subcommand, add a corresponding `run_test` call in this sc
 
 ### Hermes Home Directory
 
-Default: `~/.hermez/` (override with `HERMES_HOME` env var or `--hermez-home` / `--profile` CLI flags).
+Default: `~/.hermez/` (override with `HERMEZ_HOME` env var or `--hermez-home` / `--profile` CLI flags).
 
 ```
 ~/.hermez/
@@ -275,7 +275,7 @@ terminal:
 
 | Variable | Purpose |
 |----------|---------|
-| `HERMES_HOME` | Override data directory |
+| `HERMEZ_HOME` | Override data directory |
 | `OPENAI_API_KEY` | OpenAI provider key |
 | `ANTHROPIC_API_KEY` | Anthropic provider key |
 | `OPENROUTER_API_KEY` | OpenRouter aggregator key |

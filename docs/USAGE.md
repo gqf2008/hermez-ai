@@ -482,7 +482,7 @@ hermes doctor --fix         # 自动修复发现的问题
 
 | 变量 | 说明 |
 |------|------|
-| `HERMES_HOME` | 自定义数据目录（替代 `~/.hermes`） |
+| `HERMEZ_HOME` | 自定义数据目录（替代 `~/.hermez`） |
 | `OPENAI_API_KEY` | OpenAI API 密钥 |
 | `ANTHROPIC_API_KEY` | Anthropic API 密钥 |
 | `OPENROUTER_API_KEY` | OpenRouter API 密钥 |
