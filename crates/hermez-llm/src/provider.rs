@@ -251,4 +251,167 @@ mod tests {
         assert_eq!(get_default_model_for_provider(ProviderType::Custom), None);
         assert_eq!(get_default_model_for_provider(ProviderType::Unknown), None);
     }
+
+    #[test]
+    fn test_provider_type_display() {
+        assert_eq!(format!("{}", ProviderType::OpenRouter), "openrouter");
+        assert_eq!(format!("{}", ProviderType::Nous), "nous");
+        assert_eq!(format!("{}", ProviderType::Custom), "custom");
+        assert_eq!(format!("{}", ProviderType::Codex), "openai-codex");
+        assert_eq!(format!("{}", ProviderType::Gemini), "gemini");
+        assert_eq!(format!("{}", ProviderType::Zai), "zai");
+        assert_eq!(format!("{}", ProviderType::Kimi), "kimi");
+        assert_eq!(format!("{}", ProviderType::Minimax), "minimax");
+        assert_eq!(format!("{}", ProviderType::Anthropic), "anthropic");
+        assert_eq!(format!("{}", ProviderType::OpenAI), "openai");
+        assert_eq!(format!("{}", ProviderType::Ollama), "ollama");
+        assert_eq!(format!("{}", ProviderType::GoogleGeminiCli), "google-gemini-cli");
+        assert_eq!(format!("{}", ProviderType::Unknown), "unknown");
+    }
+
+    #[test]
+    fn test_provider_headers_openrouter() {
+        let headers = provider_headers(ProviderType::OpenRouter);
+        assert_eq!(
+            headers.get("HTTP-Referer"),
+            Some(&"https://hermez-agent.local".to_string())
+        );
+        assert_eq!(headers.get("X-Title"), Some(&"Hermez Agent".to_string()));
+    }
+
+    #[test]
+    fn test_provider_headers_anthropic() {
+        let headers = provider_headers(ProviderType::Anthropic);
+        assert_eq!(headers.get("anthropic-version"), Some(&"2023-06-01".to_string()));
+    }
+
+    #[test]
+    fn test_provider_headers_others_empty() {
+        for pt in [
+            ProviderType::Nous,
+            ProviderType::Custom,
+            ProviderType::Codex,
+            ProviderType::Gemini,
+            ProviderType::Zai,
+            ProviderType::Kimi,
+            ProviderType::Minimax,
+            ProviderType::OpenAI,
+            ProviderType::Ollama,
+            ProviderType::GoogleGeminiCli,
+            ProviderType::Unknown,
+        ] {
+            assert!(provider_headers(pt.clone()).is_empty(), "{:?} should have empty headers", pt);
+        }
+    }
+
+    #[test]
+    fn test_resolve_provider_alias_all() {
+        assert_eq!(resolve_provider_alias("gemini-cli"), "google-gemini-cli");
+        assert_eq!(resolve_provider_alias("z-ai"), "zai");
+        assert_eq!(resolve_provider_alias("z.ai"), "zai");
+        assert_eq!(resolve_provider_alias("zhipu"), "zai");
+        assert_eq!(resolve_provider_alias("kimi"), "kimi-coding");
+        assert_eq!(resolve_provider_alias("moonshot"), "kimi-coding");
+        assert_eq!(resolve_provider_alias("minimax_china"), "minimax-cn");
+        assert_eq!(resolve_provider_alias("minimax_cn"), "minimax-cn");
+        assert_eq!(resolve_provider_alias("claude-code"), "anthropic");
+        assert_eq!(resolve_provider_alias("deepseek"), "deepseek");
+    }
+
+    #[test]
+    fn test_parse_provider_aliases() {
+        assert_eq!(parse_provider("google"), ProviderType::Gemini);
+        assert_eq!(parse_provider("claude"), ProviderType::Anthropic);
+        assert_eq!(parse_provider("glm"), ProviderType::Zai);
+        // moonshot aliases to "kimi-coding" which is not in parse_provider match arms
+        assert_eq!(parse_provider("moonshot"), ProviderType::Unknown);
+    }
+
+    #[test]
+    fn test_parse_provider_local() {
+        assert_eq!(parse_provider("local"), ProviderType::Custom);
+    }
+
+    #[test]
+    fn test_parse_provider_codex_variants() {
+        assert_eq!(parse_provider("codex"), ProviderType::Codex);
+        assert_eq!(parse_provider("openai-codex"), ProviderType::Codex);
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_all_known() {
+        assert_eq!(strip_provider_prefix("anthropic:claude-3"), "claude-3");
+        assert_eq!(strip_provider_prefix("openai:gpt-4"), "gpt-4");
+        assert_eq!(strip_provider_prefix("nous:model"), "model");
+        assert_eq!(strip_provider_prefix("custom:local"), "local");
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_no_extra_colon() {
+        // If there's no colon after prefix, don't strip
+        assert_eq!(strip_provider_prefix("openrouter"), "openrouter");
+    }
+
+    #[test]
+    fn test_default_base_url_all() {
+        assert_eq!(
+            default_base_url(ProviderType::Nous),
+            Some("https://api.nousresearch.com/v1")
+        );
+        assert_eq!(
+            default_base_url(ProviderType::Codex),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            default_base_url(ProviderType::Gemini),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        assert_eq!(
+            default_base_url(ProviderType::Ollama),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            default_base_url(ProviderType::GoogleGeminiCli),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
+        assert_eq!(default_base_url(ProviderType::Zai), None);
+        assert_eq!(default_base_url(ProviderType::Kimi), None);
+        assert_eq!(default_base_url(ProviderType::Minimax), None);
+    }
+
+    #[test]
+    fn test_get_default_model_for_provider_all() {
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::OpenRouter),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Nous),
+            Some("nousresearch/hermes-3-llama-3.1-70b")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Codex),
+            Some("o3")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Gemini),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Kimi),
+            Some("kimi-k2-0905")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Minimax),
+            Some("MiniMax-M2.5")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::Ollama),
+            Some("llama3")
+        );
+        assert_eq!(
+            get_default_model_for_provider(ProviderType::GoogleGeminiCli),
+            Some("gemini-2.5-flash")
+        );
+    }
 }

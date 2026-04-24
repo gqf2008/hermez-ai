@@ -269,3 +269,105 @@ pub trait ApprovalHandler: Send + Sync {
     /// Returns `"approve"`, `"approve_session"`, `"approve_always"`, or `"deny"`.
     async fn request_approval(&self, command: &str, description: &str) -> Result<String, String>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_config_default() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.model, "anthropic/claude-opus-4-6");
+        assert_eq!(cfg.max_iterations, 90);
+        assert!(cfg.enable_caching);
+        assert!(!cfg.compression_enabled);
+        assert_eq!(cfg.memory_nudge_interval, 10);
+        assert_eq!(cfg.skill_nudge_interval, 10);
+        assert_eq!(cfg.memory_flush_min_turns, 6);
+        assert!(cfg.self_evolution_enabled);
+        assert!(cfg.persist_session);
+        assert!(cfg.credential_pool.is_none());
+        assert!(cfg.provider_preferences.is_none());
+        assert!(cfg.session_db.is_none());
+        assert!(cfg.base_url.is_none());
+        assert!(cfg.api_key.is_none());
+        assert!(cfg.provider.is_none());
+    }
+
+    #[test]
+    fn test_exit_reason_display() {
+        assert_eq!(format!("{}", ExitReason::Completed), "completed");
+        assert_eq!(format!("{}", ExitReason::MaxIterations), "max_iterations");
+        assert_eq!(format!("{}", ExitReason::BudgetExhausted), "budget_exhausted");
+        assert_eq!(format!("{}", ExitReason::Interrupted), "interrupted");
+        assert_eq!(format!("{}", ExitReason::HookAborted), "hook_aborted");
+        assert_eq!(format!("{}", ExitReason::ToolLoopDetected), "tool_loop_detected");
+        assert_eq!(format!("{}", ExitReason::Partial), "partial");
+        assert_eq!(format!("{}", ExitReason::LlmError), "llm_error");
+        assert_eq!(format!("{}", ExitReason::DepthLimit), "depth_limit");
+        assert_eq!(format!("{}", ExitReason::TooManyTasks), "too_many_tasks");
+        assert_eq!(format!("{}", ExitReason::Panic), "panic");
+        assert_eq!(format!("{}", ExitReason::CreationError), "creation_error");
+        assert_eq!(format!("{}", ExitReason::NaturalStop), "natural_stop");
+    }
+
+    #[test]
+    fn test_turn_usage_creation() {
+        let usage = TurnUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn test_turn_result_creation() {
+        let result = TurnResult {
+            response: "hello".to_string(),
+            messages: Vec::new(),
+            api_calls: 3,
+            exit_reason: ExitReason::Completed,
+            compression_exhausted: false,
+            usage: None,
+        };
+        assert_eq!(result.response, "hello");
+        assert_eq!(result.api_calls, 3);
+        assert!(!result.compression_exhausted);
+    }
+
+    #[test]
+    fn test_primary_runtime_creation() {
+        let rt = PrimaryRuntime {
+            model: "gpt-4".to_string(),
+            base_url: Some("http://localhost".to_string()),
+            api_key: Some("key".to_string()),
+            provider: Some("openai".to_string()),
+        };
+        assert_eq!(rt.model, "gpt-4");
+        assert_eq!(rt.base_url, Some("http://localhost".to_string()));
+    }
+
+    #[test]
+    fn test_pre_llm_hook_result_variants() {
+        let _ = PreLlmHookResult::Continue;
+        let _ = PreLlmHookResult::Abort("stop".to_string());
+        let _ = PreLlmHookResult::OverrideSystem("new".to_string());
+        let _ = PreLlmHookResult::OverrideMessages(Vec::new());
+        let _ = PreLlmHookResult::OverrideBoth("sys".to_string(), Vec::new());
+    }
+
+    #[test]
+    fn test_fallback_provider_creation() {
+        let fp = FallbackProvider {
+            model: "backup".to_string(),
+            base_url: None,
+            api_key: None,
+            provider: Some("openrouter".to_string()),
+        };
+        assert_eq!(fp.model, "backup");
+        assert_eq!(fp.provider, Some("openrouter".to_string()));
+    }
+}

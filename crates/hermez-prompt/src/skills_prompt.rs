@@ -505,4 +505,140 @@ mod tests {
         // Just verify it doesn't panic
         let _ = result;
     }
+
+    #[test]
+    fn test_extract_description_from_frontmatter() {
+        let mut fm = HashMap::new();
+        fm.insert("description".to_string(), "A skill".to_string());
+        assert_eq!(extract_description(&fm), "A skill");
+    }
+
+    #[test]
+    fn test_extract_description_fallback_to_name() {
+        let mut fm = HashMap::new();
+        fm.insert("name".to_string(), "My Skill".to_string());
+        assert_eq!(extract_description(&fm), "My Skill");
+    }
+
+    #[test]
+    fn test_extract_description_empty() {
+        let fm = HashMap::new();
+        assert_eq!(extract_description(&fm), "");
+    }
+
+    #[test]
+    fn test_extract_conditions_all_fields() {
+        let mut fm = HashMap::new();
+        fm.insert("requires_tools".to_string(), "a, b, c".to_string());
+        fm.insert("requires_toolsets".to_string(), "web, code".to_string());
+        fm.insert("fallback_for_tools".to_string(), "x, y".to_string());
+        fm.insert("fallback_for_toolsets".to_string(), "z".to_string());
+        let conds = extract_conditions(&fm);
+        assert_eq!(conds.requires_tools, vec!["a", "b", "c"]);
+        assert_eq!(conds.requires_toolsets, vec!["web", "code"]);
+        assert_eq!(conds.fallback_for_tools, vec!["x", "y"]);
+        assert_eq!(conds.fallback_for_toolsets, vec!["z"]);
+    }
+
+    #[test]
+    fn test_extract_conditions_empty() {
+        let fm = HashMap::new();
+        let conds = extract_conditions(&fm);
+        assert!(conds.requires_tools.is_empty());
+        assert!(conds.requires_toolsets.is_empty());
+    }
+
+    #[test]
+    fn test_extract_platforms() {
+        let mut fm = HashMap::new();
+        fm.insert("platforms".to_string(), "cli, telegram, discord".to_string());
+        let platforms = extract_platforms(&fm);
+        assert_eq!(platforms, vec!["cli", "telegram", "discord"]);
+    }
+
+    #[test]
+    fn test_extract_platforms_empty() {
+        let fm = HashMap::new();
+        assert!(extract_platforms(&fm).is_empty());
+    }
+
+    #[test]
+    fn test_skill_should_show_requires_toolsets() {
+        let conditions = SkillConditions {
+            requires_toolsets: vec!["web".to_string()],
+            ..Default::default()
+        };
+        let mut toolsets = HashSet::new();
+        toolsets.insert("web".to_string());
+        assert!(skill_should_show(&conditions, &HashSet::new(), &toolsets));
+
+        toolsets.remove("web");
+        assert!(!skill_should_show(&conditions, &HashSet::new(), &toolsets));
+    }
+
+    #[test]
+    fn test_skill_should_show_fallback_for_toolsets() {
+        let conditions = SkillConditions {
+            fallback_for_toolsets: vec!["code".to_string()],
+            ..Default::default()
+        };
+        let mut toolsets = HashSet::new();
+        toolsets.insert("code".to_string());
+        assert!(!skill_should_show(&conditions, &HashSet::new(), &toolsets));
+
+        toolsets.remove("code");
+        assert!(skill_should_show(&conditions, &HashSet::new(), &toolsets));
+    }
+
+    #[test]
+    fn test_determine_category_from_path() {
+        let skills_dir = PathBuf::from("/skills");
+        let path = PathBuf::from("/skills/dev/my_skill/SKILL.md");
+        assert_eq!(determine_category(&path, &skills_dir), "dev");
+    }
+
+    #[test]
+    fn test_determine_category_too_shallow() {
+        let skills_dir = PathBuf::from("/skills");
+        let path = PathBuf::from("/skills/SKILL.md");
+        assert_eq!(determine_category(&path, &skills_dir), "general");
+    }
+
+    #[test]
+    fn test_determine_category_outside_skills() {
+        let skills_dir = PathBuf::from("/skills");
+        let path = PathBuf::from("/other/file.md");
+        assert_eq!(determine_category(&path, &skills_dir), "general");
+    }
+
+    #[test]
+    fn test_format_skills_prompt_empty_desc() {
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "cat".to_string(),
+            vec![("skill1".to_string(), "".to_string())],
+        );
+        let descs = BTreeMap::new();
+        let prompt = format_skills_prompt(&skills, &descs);
+        assert!(prompt.contains("skill1"));
+        // With empty desc, skill line should be "    - skill1" not "    - skill1: "
+        assert!(prompt.contains("    - skill1\n"));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_end_marker() {
+        let content = "---\nkey: value\nno end marker";
+        let (fm, body) = parse_frontmatter(content);
+        assert!(fm.is_empty());
+        assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_quoted_values() {
+        let content = "---\nname: \"Test\"\ndesc: 'A test'\n---\nBody";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("name"), Some(&"Test".to_string()));
+        assert_eq!(fm.get("desc"), Some(&"A test".to_string()));
+        assert_eq!(body, "Body");
+    }
 }

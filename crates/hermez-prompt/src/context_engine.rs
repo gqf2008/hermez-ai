@@ -80,3 +80,42 @@ pub fn create_engine(name: &str, config: Option<crate::CompressorConfig>) -> Opt
 pub fn available_engines() -> &'static [&'static str] {
     &["compressor"]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_available_engines() {
+        let engines = available_engines();
+        assert_eq!(engines.len(), 1);
+        assert_eq!(engines[0], "compressor");
+    }
+
+    #[test]
+    fn test_create_engine_compressor() {
+        let engine = create_engine("compressor", None);
+        assert!(engine.is_some());
+        assert_eq!(engine.unwrap().name(), "compressor");
+    }
+
+    #[test]
+    fn test_create_engine_default() {
+        let engine = create_engine("default", None);
+        assert!(engine.is_some());
+        assert_eq!(engine.unwrap().name(), "compressor");
+    }
+
+    #[test]
+    fn test_create_engine_empty_string() {
+        let engine = create_engine("", None);
+        assert!(engine.is_some());
+        assert_eq!(engine.unwrap().name(), "compressor");
+    }
+
+    #[test]
+    fn test_create_engine_unknown_returns_none() {
+        let engine = create_engine("lcm", None);
+        assert!(engine.is_none());
+    }
+}

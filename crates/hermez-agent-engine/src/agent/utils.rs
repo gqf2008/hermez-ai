@@ -370,3 +370,206 @@ pub(crate) fn is_thinking_budget_exhausted(response: &Value, model: &str) -> boo
 
     has_open_think && !has_close_think
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── has_truncated_tool_args ───────────────────────────────────────────────
+
+    #[test]
+    fn test_truncated_args_incomplete_json() {
+        let tc = vec![serde_json::json!({
+            "function": {"arguments": "{\"x\": 1"}
+        })];
+        assert!(has_truncated_tool_args(&tc));
+    }
+
+    #[test]
+    fn test_truncated_args_valid_json() {
+        let tc = vec![serde_json::json!({
+            "function": {"arguments": "{\"x\": 1}"}
+        })];
+        assert!(!has_truncated_tool_args(&tc));
+    }
+
+    #[test]
+    fn test_truncated_args_empty() {
+        let tc: Vec<Value> = vec![];
+        assert!(!has_truncated_tool_args(&tc));
+    }
+
+    // ── is_local_endpoint ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_local_endpoint_localhost() {
+        assert!(is_local_endpoint("http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn test_local_endpoint_127() {
+        assert!(is_local_endpoint("https://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn test_local_endpoint_remote() {
+        assert!(!is_local_endpoint("https://api.openai.com/v1"));
+    }
+
+    // ── estimate_tokens ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_estimate_tokens_basic() {
+        let msg = Arc::new(serde_json::json!({
+            "role": "user",
+            "content": "hello world"
+        }));
+        let est = estimate_tokens(&[msg]);
+        // Counts all string values: "user" (4/4=1) + "hello world" (11/4=2) = 3
+        assert_eq!(est, 3);
+    }
+
+    #[test]
+    fn test_estimate_tokens_empty() {
+        let est = estimate_tokens(&[]);
+        assert_eq!(est, 0);
+    }
+
+    // ── compute_backoff_ms ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_backoff_increases() {
+        let b0 = compute_backoff_ms(0);
+        let b1 = compute_backoff_ms(1);
+        let b2 = compute_backoff_ms(2);
+        assert!(b1 >= b0);
+        assert!(b2 >= b1);
+    }
+
+    #[test]
+    fn test_backoff_capped() {
+        let b5 = compute_backoff_ms(5);
+        let b10 = compute_backoff_ms(10);
+        assert_eq!(b5, b10); // capped at exponent 5
+    }
+
+    // ── rollback_to_last_assistant ────────────────────────────────────────────
+
+    #[test]
+    fn test_rollback_finds_last_assistant() {
+        let msgs = vec![
+            Arc::new(serde_json::json!({"role": "user"})),
+            Arc::new(serde_json::json!({"role": "assistant"})),
+            Arc::new(serde_json::json!({"role": "user"})),
+            Arc::new(serde_json::json!({"role": "assistant"})),
+            Arc::new(serde_json::json!({"role": "tool"})),
+        ];
+        let rolled = rollback_to_last_assistant(&msgs);
+        assert_eq!(rolled.len(), 3);
+    }
+
+    #[test]
+    fn test_rollback_no_assistant() {
+        let msgs = vec![
+            Arc::new(serde_json::json!({"role": "user"})),
+            Arc::new(serde_json::json!({"role": "user"})),
+        ];
+        let rolled = rollback_to_last_assistant(&msgs);
+        assert_eq!(rolled.len(), 2);
+    }
+
+    // ── has_think_tags ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_think_tags_detected() {
+        assert!(has_think_tags("<think>some reasoning</think>"));
+        assert!(has_think_tags("<thinking>..."));
+        assert!(has_think_tags("<reasoning>...</reasoning>"));
+    }
+
+    #[test]
+    fn test_think_tags_not_detected() {
+        assert!(!has_think_tags("normal text"));
+        assert!(!has_think_tags(""));
+    }
+
+    // ── sanitize_api_messages ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_merges_consecutive_user() {
+        let msgs = vec![
+            Arc::new(serde_json::json!({"role": "user", "content": "hello"})),
+            Arc::new(serde_json::json!({"role": "user", "content": "world"})),
+        ];
+        let out = sanitize_api_messages(&msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["content"], "hello\n\nworld");
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphaned_tool() {
+        let msgs = vec![
+            Arc::new(serde_json::json!({"role": "user", "content": "hi"})),
+            Arc::new(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "nonexistent",
+                "content": "result"
+            })),
+        ];
+        let out = sanitize_api_messages(&msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+    }
+
+    // ── normalize_messages ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_trims_assistant_content() {
+        let msgs = vec![
+            Arc::new(serde_json::json!({
+                "role": "assistant",
+                "content": "  trimmed  "
+            })),
+        ];
+        let out = normalize_messages(&msgs);
+        assert_eq!(out[0]["content"], "trimmed");
+    }
+
+    // ── is_thinking_budget_exhausted ──────────────────────────────────────────
+
+    #[test]
+    fn test_thinking_exhausted_reasoning_model_length() {
+        let resp = serde_json::json!({
+            "finish_reason": "length",
+            "content": "<think>partial"
+        });
+        assert!(is_thinking_budget_exhausted(&resp, "anthropic/claude-opus-4-6"));
+    }
+
+    #[test]
+    fn test_thinking_not_exhausted_non_reasoning() {
+        let resp = serde_json::json!({
+            "finish_reason": "length",
+            "content": "<think>partial"
+        });
+        assert!(!is_thinking_budget_exhausted(&resp, "openai/gpt-4o"));
+    }
+
+    #[test]
+    fn test_thinking_not_exhausted_complete_tags() {
+        let resp = serde_json::json!({
+            "finish_reason": "length",
+            "content": "<think>done</think>"
+        });
+        assert!(!is_thinking_budget_exhausted(&resp, "anthropic/claude-opus-4-6"));
+    }
+
+    #[test]
+    fn test_thinking_not_exhausted_stop_reason() {
+        let resp = serde_json::json!({
+            "finish_reason": "stop",
+            "content": "<think>partial"
+        });
+        assert!(!is_thinking_budget_exhausted(&resp, "anthropic/claude-opus-4-6"));
+    }
+}

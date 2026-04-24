@@ -316,4 +316,102 @@ mod tests {
         let result = provider.handle_tool_call("search_memory", &args, &HashMap::new());
         assert!(result.contains("Query is required"));
     }
+
+    #[test]
+    fn test_system_prompt_block_without_db() {
+        let provider = HermezStateMemoryProvider::new();
+        assert!(provider.system_prompt_block().is_empty());
+    }
+
+    #[test]
+    fn test_get_tool_schemas_without_db() {
+        let provider = HermezStateMemoryProvider::new();
+        assert!(provider.get_tool_schemas().is_empty());
+    }
+
+    #[test]
+    fn test_on_pre_compress_short_messages() {
+        let provider = HermezStateMemoryProvider::new();
+        let messages: Vec<Message> = vec![
+            Arc::new(json!({"role": "user", "content": "hello"})),
+            Arc::new(json!({"role": "assistant", "content": "hi"})),
+        ];
+        assert!(provider.on_pre_compress(&messages).is_empty());
+    }
+
+    #[test]
+    fn test_on_pre_compress_filters_user_content() {
+        let provider = HermezStateMemoryProvider::new();
+        let messages: Vec<Message> = vec![
+            Arc::new(json!({"role": "user", "content": "topic one"})),
+            Arc::new(json!({"role": "assistant", "content": "reply"})),
+            Arc::new(json!({"role": "user", "content": "topic two"})),
+            Arc::new(json!({"role": "assistant", "content": "reply"})),
+        ];
+        let result = provider.on_pre_compress(&messages);
+        assert!(result.contains("topic one"));
+        assert!(result.contains("topic two"));
+    }
+
+    #[test]
+    fn test_on_pre_compress_skips_long_content() {
+        let provider = HermezStateMemoryProvider::new();
+        let long_content = "x".repeat(600);
+        let messages: Vec<Message> = vec![
+            Arc::new(json!({"role": "user", "content": "short"})),
+            Arc::new(json!({"role": "assistant", "content": "reply"})),
+            Arc::new(json!({"role": "user", "content": long_content})),
+            Arc::new(json!({"role": "assistant", "content": "reply"})),
+            Arc::new(json!({"role": "user", "content": "another short"})),
+            Arc::new(json!({"role": "assistant", "content": "reply"})),
+        ];
+        let result = provider.on_pre_compress(&messages);
+        assert!(result.contains("short"));
+        assert!(!result.contains(&long_content));
+    }
+
+    #[test]
+    fn test_on_pre_compress_empty_when_no_user_msgs() {
+        let provider = HermezStateMemoryProvider::new();
+        let messages: Vec<Message> = vec![
+            Arc::new(json!({"role": "assistant", "content": "reply1"})),
+            Arc::new(json!({"role": "assistant", "content": "reply2"})),
+            Arc::new(json!({"role": "assistant", "content": "reply3"})),
+            Arc::new(json!({"role": "assistant", "content": "reply4"})),
+        ];
+        assert!(provider.on_pre_compress(&messages).is_empty());
+    }
+
+    #[test]
+    fn test_format_ts_valid() {
+        let ts = 1704067200i64; // 2024-01-01 00:00:00 UTC
+        let formatted = HermezStateMemoryProvider::format_ts(ts);
+        assert!(formatted.starts_with("2024-01-01"));
+    }
+
+    #[test]
+    fn test_format_ts_invalid() {
+        let ts = i64::MAX;
+        let formatted = HermezStateMemoryProvider::format_ts(ts);
+        assert_eq!(formatted, ts.to_string());
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let provider: HermezStateMemoryProvider = Default::default();
+        assert_eq!(provider.name(), "hermez-state");
+    }
+
+    #[test]
+    fn test_sync_turn_no_panic() {
+        let provider = HermezStateMemoryProvider::new();
+        provider.sync_turn("user", "assistant", "sid");
+    }
+
+    #[test]
+    fn test_list_recent_sessions_without_db() {
+        let provider = HermezStateMemoryProvider::new();
+        let result = provider.handle_tool_call("list_recent_sessions", &Map::new(), &HashMap::new());
+        assert!(result.contains("error"));
+    }
 }

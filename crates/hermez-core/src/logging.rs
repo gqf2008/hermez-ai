@@ -119,3 +119,35 @@ pub fn is_log_path(path: &Path) -> bool {
     let log_dir = get_hermez_home().join(LOG_DIR_NAME);
     path.starts_with(&log_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_is_log_path_positive() {
+        let log_dir = get_hermez_home().join(LOG_DIR_NAME);
+        let log_file = log_dir.join("agent.log");
+        assert!(is_log_path(&log_file));
+    }
+
+    #[test]
+    fn test_is_log_path_nested() {
+        let log_dir = get_hermez_home().join(LOG_DIR_NAME);
+        let nested = log_dir.join("sub").join("error.log");
+        assert!(is_log_path(&nested));
+    }
+
+    #[test]
+    fn test_is_log_path_negative() {
+        let not_log = PathBuf::from("/tmp/other.txt");
+        assert!(!is_log_path(&not_log));
+    }
+
+    #[test]
+    fn test_is_log_path_config_not_log() {
+        let config = get_hermez_home().join("config.yaml");
+        assert!(!is_log_path(&config));
+    }
+}

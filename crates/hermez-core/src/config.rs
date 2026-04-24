@@ -876,6 +876,134 @@ mod tests {
         assert_eq!(config["_config_version"], Value::Number(serde_json::Number::from(18)));
         assert_eq!(config["model"]["name"], Value::String("anthropic/claude-opus-4-6".to_string()));
     }
+
+    #[test]
+    fn test_coerce_bool_true_variants() {
+        assert!(coerce_bool("true"));
+        assert!(coerce_bool("TRUE"));
+        assert!(coerce_bool("True"));
+        assert!(coerce_bool("1"));
+        assert!(coerce_bool("yes"));
+        assert!(coerce_bool("YES"));
+        assert!(coerce_bool("on"));
+        assert!(coerce_bool("ON"));
+    }
+
+    #[test]
+    fn test_coerce_bool_false_variants() {
+        assert!(!coerce_bool("false"));
+        assert!(!coerce_bool("0"));
+        assert!(!coerce_bool("no"));
+        assert!(!coerce_bool("off"));
+        assert!(!coerce_bool(""));
+        assert!(!coerce_bool("maybe"));
+        assert!(!coerce_bool(" random "));
+    }
+
+    #[test]
+    fn test_config_save_and_load() {
+        let tmp_dir = std::env::temp_dir().join(format!("hermez_config_test_{}", std::process::id()));
+        std::env::set_var("HERMEZ_HOME", &tmp_dir);
+        let _ = crate::hermez_home::set_hermez_home(&tmp_dir);
+
+        let config = HermezConfig {
+            model: ModelConfig {
+                name: Some("openai/gpt-4o".to_string()),
+                temperature: Some(0.5),
+                ..Default::default()
+            },
+            terminal: TerminalConfig {
+                backend: "docker".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.save().unwrap();
+        let loaded = HermezConfig::load().unwrap();
+        assert_eq!(loaded.model.name, Some("openai/gpt-4o".to_string()));
+        assert_eq!(loaded.model.temperature, Some(0.5));
+        assert_eq!(loaded.terminal.backend, "docker");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::env::remove_var("HERMEZ_HOME");
+    }
+
+    #[test]
+    fn test_deserialize_context_length_integer() {
+        let yaml = "context_length: 256000";
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let json: Value = serde_json::to_value(value).unwrap();
+        let model: ModelConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(model.context_length, Some(256000));
+    }
+
+    #[test]
+    fn test_deserialize_context_length_string_numeric() {
+        let yaml = "context_length: '128000'";
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let json: Value = serde_json::to_value(value).unwrap();
+        let model: ModelConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(model.context_length, Some(128000));
+    }
+
+    #[test]
+    fn test_deserialize_context_length_suffixed_returns_none() {
+        let yaml = "context_length: '256K'";
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let json: Value = serde_json::to_value(value).unwrap();
+        let model: ModelConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(model.context_length, None);
+    }
+
+    #[test]
+    fn test_migrate_v14_to_v15_display() {
+        let mut config = serde_json::json!({
+            "_config_version": 14,
+            "display": {}
+        });
+        migrate_config(&mut config);
+        assert_eq!(
+            config["display"]["interim_assistant_messages"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_migrate_v15_to_v16_tool_progress_overrides() {
+        let mut config = serde_json::json!({
+            "_config_version": 15,
+            "display": {
+                "tool_progress_overrides": {
+                    "telegram": "minimal"
+                }
+            }
+        });
+        migrate_config(&mut config);
+        assert!(config["display"].get("tool_progress_overrides").is_none());
+        assert_eq!(
+            config["display"]["platforms"]["telegram"]["tool_progress"],
+            Value::String("minimal".to_string())
+        );
+    }
+
+    #[test]
+    fn test_migrate_v16_to_v17_compression_summary() {
+        let mut config = serde_json::json!({
+            "_config_version": 16,
+            "compression": {
+                "summary_model": "gpt-4o-mini",
+                "summary_provider": "openai",
+                "summary_base_url": "https://api.openai.com"
+            }
+        });
+        migrate_config(&mut config);
+        assert!(config["auxiliary"]["compression"].is_object());
+        assert_eq!(
+            config["auxiliary"]["compression"]["model"],
+            Value::String("gpt-4o-mini".to_string())
+        );
+    }
 }
 
 /// Coerce a string value to a boolean.

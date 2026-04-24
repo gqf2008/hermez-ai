@@ -161,3 +161,144 @@ pub trait MemoryProvider: Send + Sync {
     /// Called when the built-in memory tool writes an entry.
     fn on_memory_write(&self, _action: &str, _target: &str, _content: &str) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Map;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl MemoryProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn initialize(&self, _session_id: &str, _kwargs: &HashMap<String, Value>) {}
+
+        fn get_tool_schemas(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn test_config_field_creation() {
+        let field = ConfigField {
+            key: "api_key".to_string(),
+            description: "API key".to_string(),
+            secret: true,
+            required: true,
+            default: None,
+            choices: Some(vec!["a".to_string(), "b".to_string()]),
+            url: Some("https://example.com".to_string()),
+            env_var: Some("API_KEY".to_string()),
+        };
+        assert_eq!(field.key, "api_key");
+        assert!(field.secret);
+        assert!(field.required);
+        assert_eq!(field.choices.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_provider_name() {
+        let p = MockProvider;
+        assert_eq!(p.name(), "mock");
+    }
+
+    #[test]
+    fn test_provider_is_available() {
+        let p = MockProvider;
+        assert!(p.is_available());
+    }
+
+    #[test]
+    fn test_default_system_prompt_block_empty() {
+        let p = MockProvider;
+        assert!(p.system_prompt_block().is_empty());
+    }
+
+    #[test]
+    fn test_default_prefetch_empty() {
+        let p = MockProvider;
+        assert!(p.prefetch("query", "sid").is_empty());
+    }
+
+    #[test]
+    fn test_default_queue_prefetch_no_panic() {
+        let p = MockProvider;
+        p.queue_prefetch("q", "sid");
+    }
+
+    #[test]
+    fn test_default_sync_turn_no_panic() {
+        let p = MockProvider;
+        p.sync_turn("user", "assistant", "sid");
+    }
+
+    #[test]
+    fn test_default_tool_schemas_empty() {
+        let p = MockProvider;
+        assert!(p.get_tool_schemas().is_empty());
+    }
+
+    #[test]
+    fn test_default_handle_tool_call_error() {
+        let p = MockProvider;
+        let result = p.handle_tool_call("unknown", &Map::new(), &HashMap::new());
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("error").unwrap().as_str().unwrap().contains("mock"));
+    }
+
+    #[test]
+    fn test_default_shutdown_no_panic() {
+        let p = MockProvider;
+        p.shutdown();
+    }
+
+    #[test]
+    fn test_default_on_turn_start_no_panic() {
+        let p = MockProvider;
+        p.on_turn_start(1, "msg", &HashMap::new());
+    }
+
+    #[test]
+    fn test_default_on_session_end_no_panic() {
+        let p = MockProvider;
+        p.on_session_end(&[]);
+    }
+
+    #[test]
+    fn test_default_on_pre_compress_empty() {
+        let p = MockProvider;
+        assert!(p.on_pre_compress(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_default_on_delegation_no_panic() {
+        let p = MockProvider;
+        p.on_delegation("task", "result", "child", &HashMap::new());
+    }
+
+    #[test]
+    fn test_default_get_config_schema_empty() {
+        let p = MockProvider;
+        assert!(p.get_config_schema().is_empty());
+    }
+
+    #[test]
+    fn test_default_save_config_no_panic() {
+        let p = MockProvider;
+        p.save_config(&HashMap::new(), "/tmp");
+    }
+
+    #[test]
+    fn test_default_on_memory_write_no_panic() {
+        let p = MockProvider;
+        p.on_memory_write("add", "key", "value");
+    }
+}

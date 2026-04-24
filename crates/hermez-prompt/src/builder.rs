@@ -782,7 +782,10 @@ mod tests {
 
     #[test]
     fn test_e2e_prompt_with_user_system_prompt() {
-        let config = PromptBuilderConfig::default();
+        let config = PromptBuilderConfig {
+            skip_context_files: true,
+            ..Default::default()
+        };
         let result = build_system_prompt(&config, Some("You are a helpful assistant focused on security."));
 
         assert!(result.system_prompt.contains("security"));

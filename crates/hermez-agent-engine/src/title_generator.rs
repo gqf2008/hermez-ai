@@ -268,4 +268,68 @@ mod tests {
         assert_eq!(user_msg_count, 3);
         assert!(user_msg_count > 2);
     }
+
+    #[test]
+    fn test_clean_title_removes_single_quotes() {
+        assert_eq!(clean_title("'My Title'"), "My Title");
+    }
+
+    #[test]
+    fn test_clean_title_removes_mixed_quotes() {
+        // trim_matches removes ALL matching chars from both ends
+        assert_eq!(clean_title("\"'Mixed'\""), "Mixed");
+    }
+
+    #[test]
+    fn test_clean_title_removes_title_dash_prefix() {
+        assert_eq!(clean_title("Title - My Topic"), "My Topic");
+    }
+
+    #[test]
+    fn test_clean_title_case_insensitive_prefix() {
+        assert_eq!(clean_title("TITLE: My Topic"), "My Topic");
+    }
+
+    #[test]
+    fn test_clean_title_empty_after_cleanup() {
+        assert_eq!(clean_title("\"\""), "");
+    }
+
+    #[test]
+    fn test_truncate_str_basic() {
+        assert_eq!(truncate_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_unicode() {
+        // 7 chars: h e l l o (space) 🌍
+        assert_eq!(truncate_str("hello 🌍 world", 7), "hello 🌍");
+    }
+
+    #[test]
+    fn test_truncate_str_longer_than_input() {
+        assert_eq!(truncate_str("hi", 100), "hi");
+    }
+
+    #[test]
+    fn test_truncate_start_basic() {
+        assert_eq!(truncate_start("hello world", 6), "world");
+    }
+
+    #[test]
+    fn test_in_memory_store_overwrite() {
+        let store = InMemoryTitleStore::new();
+        store.set_session_title("s1", "First");
+        store.set_session_title("s1", "Second");
+        assert_eq!(store.get_session_title("s1"), Some("Second".to_string()));
+    }
+
+    #[test]
+    fn test_in_memory_store_multiple_sessions() {
+        let store = InMemoryTitleStore::new();
+        store.set_session_title("s1", "Title 1");
+        store.set_session_title("s2", "Title 2");
+        assert_eq!(store.get_session_title("s1"), Some("Title 1".to_string()));
+        assert_eq!(store.get_session_title("s2"), Some("Title 2".to_string()));
+    }
 }

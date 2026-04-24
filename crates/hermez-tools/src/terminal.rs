@@ -1377,10 +1377,22 @@ mod tests {
 
     #[test]
     fn test_background_starts() {
+        // Force local backend so pid is included regardless of user config.
+        let saved = std::env::var("HERMEZ_TERMINAL_BACKEND").ok();
+        std::env::set_var("HERMEZ_TERMINAL_BACKEND", "local");
+
         let result = handle_terminal(serde_json::json!({
             "command": "sleep 5",
             "background": true
         }));
+
+        // Restore env
+        if let Some(v) = saved {
+            std::env::set_var("HERMEZ_TERMINAL_BACKEND", v);
+        } else {
+            std::env::remove_var("HERMEZ_TERMINAL_BACKEND");
+        }
+
         let json: Value = serde_json::from_str(&result.unwrap()).unwrap();
         if json.get("success").and_then(Value::as_bool).unwrap_or(false) {
             assert!(json.get("session_id").is_some());

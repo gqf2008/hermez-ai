@@ -581,4 +581,109 @@ mod tests {
         let stripped = remove_reference_tokens("Hello @file:x.txt world", &refs);
         assert_eq!(stripped, "Hello  world");
     }
+
+    #[test]
+    fn test_is_word_char_before() {
+        assert!(!is_word_char_before("abc", 0));
+        assert!(is_word_char_before("abc", 1)); // 'b' preceded by 'a'
+        assert!(is_word_char_before("a/b", 2)); // 'b' preceded by '/'
+        assert!(!is_word_char_before(" a", 1)); // 'a' preceded by space
+    }
+
+    #[test]
+    fn test_estimate_tokens_rough() {
+        assert_eq!(estimate_tokens_rough("hello"), 1); // 5/4 = 1
+        assert_eq!(estimate_tokens_rough("hello world"), 2); // 11/4 = 2
+        assert_eq!(estimate_tokens_rough(""), 0);
+    }
+
+    #[test]
+    fn test_strip_trailing_punctuation() {
+        assert_eq!(strip_trailing_punctuation("file.txt,"), "file.txt");
+        assert_eq!(strip_trailing_punctuation("file.txt;"), "file.txt");
+        assert_eq!(strip_trailing_punctuation("file.txt."), "file.txt");
+        assert_eq!(strip_trailing_punctuation("file.txt"), "file.txt");
+    }
+
+    #[test]
+    fn test_strip_reference_wrappers_unmatched() {
+        assert_eq!(strip_reference_wrappers("`file"), "`file");
+        assert_eq!(strip_reference_wrappers("file`"), "file`");
+    }
+
+    #[test]
+    fn test_parse_file_with_line_range() {
+        let refs = parse_context_references("Check @file:src/main.rs:10-50");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "file");
+        assert_eq!(refs[0].target, "src/main.rs:10-50");
+        assert_eq!(refs[0].line_start, Some(10));
+        assert_eq!(refs[0].line_end, Some(50));
+    }
+
+    #[test]
+    fn test_parse_file_with_single_line() {
+        let refs = parse_context_references("Check @file:src/main.rs:42");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].line_start, Some(42));
+        assert_eq!(refs[0].line_end, None);
+    }
+
+    #[test]
+    fn test_parse_git_reference() {
+        let refs = parse_context_references("Show @git:5 commits");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "git");
+        assert_eq!(refs[0].target, "5");
+    }
+
+    #[test]
+    fn test_parse_folder_reference() {
+        let refs = parse_context_references("List @folder:src/ contents");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "folder");
+        assert_eq!(refs[0].target, "src/");
+    }
+
+    #[test]
+    fn test_parse_staged_reference() {
+        let refs = parse_context_references("Show @staged changes");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "staged");
+    }
+
+    #[test]
+    fn test_parse_skips_preceded_by_word_char() {
+        // "file@file:x.txt" — the @ is preceded by 'e', so skip
+        let refs = parse_context_references("email@file:x.txt");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_skips_preceded_by_slash() {
+        // "/@file:x.txt" — the @ is preceded by '/', so skip
+        let refs = parse_context_references("path/@file:x.txt");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_code_fence_language() {
+        assert_eq!(code_fence_language(Path::new("test.rs")), "rs");
+        assert_eq!(code_fence_language(Path::new("test.py")), "py");
+        assert_eq!(code_fence_language(Path::new("no_ext")), "");
+    }
+
+    #[test]
+    fn test_remove_reference_tokens_multiple() {
+        let refs = parse_context_references("A @file:x.txt B @diff C");
+        let stripped = remove_reference_tokens("A @file:x.txt B @diff C", &refs);
+        assert_eq!(stripped, "A  B  C");
+    }
+
+    #[test]
+    fn test_parse_url_with_punctuation() {
+        let refs = parse_context_references("See @url:https://example.com.");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].target, "https://example.com");
+    }
 }

@@ -60,3 +60,45 @@ pub(crate) fn dispatch_delegation(
     });
     rx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_never_parallel_tools_contains_clarify() {
+        assert!(NEVER_PARALLEL_TOOLS.contains("clarify"));
+    }
+
+    #[test]
+    fn test_never_parallel_tools_excludes_others() {
+        assert!(!NEVER_PARALLEL_TOOLS.contains("read_file"));
+        assert!(!NEVER_PARALLEL_TOOLS.contains("terminal"));
+    }
+
+    #[test]
+    fn test_parallel_safe_tools_contains_expected() {
+        assert!(PARALLEL_SAFE_TOOLS.contains("read_file"));
+        assert!(PARALLEL_SAFE_TOOLS.contains("web_search"));
+        assert!(PARALLEL_SAFE_TOOLS.contains("session_search"));
+        assert!(PARALLEL_SAFE_TOOLS.contains("vision_analyze"));
+    }
+
+    #[test]
+    fn test_parallel_safe_tools_excludes_clarify() {
+        assert!(!PARALLEL_SAFE_TOOLS.contains("clarify"));
+    }
+
+    #[test]
+    fn test_path_scoped_tools_contains_expected() {
+        assert!(PATH_SCOPED_TOOLS.contains("read_file"));
+        assert!(PATH_SCOPED_TOOLS.contains("write_file"));
+        assert!(PATH_SCOPED_TOOLS.contains("patch"));
+    }
+
+    #[test]
+    fn test_path_scoped_tools_excludes_others() {
+        assert!(!PATH_SCOPED_TOOLS.contains("terminal"));
+        assert!(!PATH_SCOPED_TOOLS.contains("web_search"));
+    }
+}

@@ -56,7 +56,7 @@ pub fn strip_think_blocks(content: &str) -> String {
         // <REASONING_SCRATCHPAD>...</REASONING_SCRATCHPAD>
         if rest.starts_with("<REASONING_SCRATCHPAD>") {
             if let Some(end) = rest.find("</REASONING_SCRATCHPAD>") {
-                i += end + 25;
+                i += end + 23;
                 continue;
             } else {
                 break;
@@ -115,4 +115,96 @@ fn find_tag(haystack: &str, tag: &str) -> Option<usize> {
                     .all(|(a, b)| a.eq_ignore_ascii_case(b))
         })
         .map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_think_blocks_basic() {
+        let input = "Hello <think>thinking</think> world";
+        assert_eq!(strip_think_blocks(input), "Hello  world");
+    }
+
+    #[test]
+    fn test_strip_thinking_case_insensitive() {
+        let input = "Before <ThInKiNg>secret</THINKING> after";
+        assert_eq!(strip_think_blocks(input), "Before  after");
+    }
+
+    #[test]
+    fn test_strip_reasoning_block() {
+        let input = "Start <reasoning>deep thought</reasoning> end";
+        assert_eq!(strip_think_blocks(input), "Start  end");
+    }
+
+    #[test]
+    fn test_strip_reasoning_scratchpad() {
+        let input = "A <REASONING_SCRATCHPAD>scratch</REASONING_SCRATCHPAD> B";
+        assert_eq!(strip_think_blocks(input), "A  B");
+    }
+
+    #[test]
+    fn test_strip_thought_case_insensitive() {
+        let input = "X <Thought>idea</THOUGHT> Y";
+        assert_eq!(strip_think_blocks(input), "X  Y");
+    }
+
+    #[test]
+    fn test_strip_think_pipe_delimited() {
+        let input = "A <|think|>inner|> B";
+        assert_eq!(strip_think_blocks(input), "A  B");
+    }
+
+    #[test]
+    fn test_strip_bare_closing_tags() {
+        let input = "Text </think> more";
+        assert_eq!(strip_think_blocks(input), "Text  more");
+    }
+
+    #[test]
+    fn test_strip_multiple_blocks() {
+        let input = "A <think>1</think> B <think>2</think> C";
+        assert_eq!(strip_think_blocks(input), "A  B  C");
+    }
+
+    #[test]
+    fn test_no_think_blocks_passthrough() {
+        let input = "Just plain text with <b>html</b> tags.";
+        assert_eq!(strip_think_blocks(input), input);
+    }
+
+    #[test]
+    fn test_unclosed_think_block_strips_to_end() {
+        let input = "Start <think>never closed";
+        assert_eq!(strip_think_blocks(input), "Start ");
+    }
+
+    #[test]
+    fn test_unclosed_thinking_block_strips_to_end() {
+        let input = "Start <thinking>never closed";
+        assert_eq!(strip_think_blocks(input), "Start ");
+    }
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(strip_think_blocks(""), "");
+    }
+
+    #[test]
+    fn test_unicode_preserved() {
+        let input = "Hello 🌍 <think>hidden</think> World";
+        assert_eq!(strip_think_blocks(input), "Hello 🌍  World");
+    }
+
+    #[test]
+    fn test_find_tag_basic() {
+        assert_eq!(find_tag("abc<THINKING>def", "<thinking>"), Some(3));
+    }
+
+    #[test]
+    fn test_find_tag_not_found() {
+        assert_eq!(find_tag("abc", "<thinking>"), None);
+    }
 }

@@ -555,4 +555,55 @@ mod tests {
         assert!(results[0].response.contains("4 provided"));
         assert!(results[0].response.contains("max_concurrent_children is 2"));
     }
+
+    #[test]
+    fn test_parse_task_all_fields() {
+        let v = serde_json::json!({
+            "goal": "test",
+            "context": "ctx",
+            "model": "m1",
+            "base_url": "http://localhost",
+            "api_key": "key123"
+        });
+        let task = parse_task(&v).unwrap();
+        assert_eq!(task.goal, "test");
+        assert_eq!(task.context, "ctx");
+        assert_eq!(task.model, Some("m1".to_string()));
+        assert_eq!(task.base_url, Some("http://localhost".to_string()));
+        assert_eq!(task.api_key, Some("key123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_task_missing_goal_returns_none() {
+        let v = serde_json::json!({"context": "no goal"});
+        assert!(parse_task(&v).is_none());
+    }
+
+    #[test]
+    fn test_parse_task_defaults() {
+        let v = serde_json::json!({"goal": "simple"});
+        let task = parse_task(&v).unwrap();
+        assert_eq!(task.context, "");
+        assert!(task.model.is_none());
+        assert!(task.base_url.is_none());
+        assert!(task.api_key.is_none());
+    }
+
+    #[test]
+    fn test_subagent_result_clone() {
+        let result = SubagentResult {
+            goal: "g".to_string(),
+            response: "r".to_string(),
+            exit_reason: ExitReason::Completed,
+            api_calls: 1,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.goal, "g");
+        assert_eq!(cloned.api_calls, 1);
+    }
+
+    #[test]
+    fn test_max_depth_constant() {
+        assert_eq!(MAX_DEPTH, 2);
+    }
 }
