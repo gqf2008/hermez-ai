@@ -134,7 +134,7 @@ impl HermezApp {
         // Build model config hashmap for runtime provider resolution
         let mut model_cfg = HashMap::new();
         if let Some(ref name) = self.config.model.name {
-            model_cfg.insert("default".to_string(), serde_json::json!(name));
+            model_cfg.insert("name".to_string(), serde_json::json!(name));
         }
         if let Some(ref provider) = self.config.model.provider {
             model_cfg.insert("provider".to_string(), serde_json::json!(provider));

@@ -71,7 +71,7 @@ pub fn resolve_runtime_provider(
     }
 
     // 2. Try to resolve from explicit provider
-    let provider = resolve_provider(&requested_provider, explicit_api_key, explicit_base_url);
+    let provider = resolve_provider(&requested_provider, explicit_api_key, explicit_base_url, model_cfg);
 
     let model_cfg = model_cfg.cloned().unwrap_or_default();
 
@@ -156,18 +156,84 @@ fn resolve_provider(
     requested_provider: &str,
     explicit_api_key: Option<&str>,
     explicit_base_url: Option<&str>,
+    model_cfg: Option<&HashMap<String, Value>>,
 ) -> String {
     let norm = requested_provider.trim().to_lowercase();
 
-    // Explicit overrides force openrouter unless clearly another provider
+    // Explicit overrides: still check config for provider clues before defaulting to openrouter
     if explicit_api_key.is_some() || explicit_base_url.is_some() {
-        if norm == "auto" || norm.is_empty() {
-            return "openrouter".to_string();
+        if norm != "auto" && !norm.is_empty() {
+            return norm;
         }
-        return norm;
+        // Check config for provider clues even with explicit api_key/base_url
+        if let Some(cfg) = model_cfg {
+            if let Some(provider) = cfg.get("provider").and_then(|v| v.as_str()) {
+                let p = provider.trim().to_lowercase();
+                if !p.is_empty() && p != "null" {
+                    return p;
+                }
+            }
+            if let Some(api_mode) = cfg.get("api_mode").and_then(|v| v.as_str()) {
+                match api_mode {
+                    "anthropic_messages" => return "anthropic".to_string(),
+                    "codex_responses" => return "openai-codex".to_string(),
+                    "bedrock_converse" => return "bedrock".to_string(),
+                    _ => {}
+                }
+            }
+            if let Some(name) = cfg.get("name").and_then(|v| v.as_str()) {
+                let name_lower = name.to_lowercase();
+                if name_lower.starts_with("claude") {
+                    return "anthropic".to_string();
+                }
+                if name_lower.starts_with("gpt-")
+                    || name_lower.starts_with("o1")
+                    || name_lower.starts_with("o3")
+                {
+                    return "openai".to_string();
+                }
+                if name_lower.starts_with("gemini") {
+                    return "gemini".to_string();
+                }
+            }
+        }
+        return "openrouter".to_string();
     }
 
     if norm == "auto" || norm.is_empty() {
+        // Check config for provider or model clues
+        if let Some(cfg) = model_cfg {
+            if let Some(provider) = cfg.get("provider").and_then(|v| v.as_str()) {
+                let p = provider.trim().to_lowercase();
+                if !p.is_empty() && p != "null" {
+                    return p;
+                }
+            }
+            if let Some(api_mode) = cfg.get("api_mode").and_then(|v| v.as_str()) {
+                match api_mode {
+                    "anthropic_messages" => return "anthropic".to_string(),
+                    "codex_responses" => return "openai-codex".to_string(),
+                    "bedrock_converse" => return "bedrock".to_string(),
+                    _ => {}
+                }
+            }
+            if let Some(name) = cfg.get("name").and_then(|v| v.as_str()) {
+                let name_lower = name.to_lowercase();
+                if name_lower.starts_with("claude") {
+                    return "anthropic".to_string();
+                }
+                if name_lower.starts_with("gpt-")
+                    || name_lower.starts_with("o1")
+                    || name_lower.starts_with("o3")
+                {
+                    return "openai".to_string();
+                }
+                if name_lower.starts_with("gemini") {
+                    return "gemini".to_string();
+                }
+            }
+        }
+
         // Check env vars for known providers
         if std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("ANTHROPIC_TOKEN").is_ok() {
             return "anthropic".to_string();
@@ -523,28 +589,31 @@ fn _resolve_anthropic_runtime(
     requested_provider: &str,
     model_cfg: &HashMap<String, Value>,
 ) -> Option<RuntimeProvider> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("ANTHROPIC_TOKEN").ok().filter(|s| !s.is_empty()))?;
-
-    let cfg_provider = model_cfg
-        .get("provider")
+    let cfg_api_key = model_cfg
+        .get("api_key")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
-        .to_lowercase();
-    let cfg_base_url = if cfg_provider == "anthropic" {
-        model_cfg
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .trim_end_matches('/')
-            .to_string()
+        .to_string();
+
+    let api_key = if !cfg_api_key.is_empty() {
+        cfg_api_key.clone()
     } else {
-        String::new()
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("ANTHROPIC_TOKEN").ok().filter(|s| !s.is_empty()))?
     };
+
+    // Always read base_url from config when in the anthropic path
+    // (provider may have been auto-inferred, so cfg_provider can be empty)
+    let cfg_base_url = model_cfg
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
 
     let base_url = if !cfg_base_url.is_empty() {
         cfg_base_url
@@ -552,12 +621,18 @@ fn _resolve_anthropic_runtime(
         "https://api.anthropic.com".to_string()
     };
 
+    let source = if !cfg_api_key.is_empty() {
+        "config"
+    } else {
+        "env"
+    };
+
     Some(RuntimeProvider {
         provider: "anthropic".to_string(),
         api_mode: "anthropic_messages".to_string(),
         base_url,
         api_key,
-        source: "env".to_string(),
+        source: source.to_string(),
         requested_provider: requested_provider.to_string(),
         ..Default::default()
     })
@@ -804,7 +879,7 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_alias() {
-        assert_eq!(resolve_provider("google", None, None), "gemini");
+        assert_eq!(resolve_provider("google", None, None, None), "gemini");
     }
 
     #[test]
