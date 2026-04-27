@@ -384,6 +384,11 @@ impl AcpServer {
             return serde_json::to_value(resp).map_err(|e| e.to_string());
         }
 
+        // Log MCP servers configured for this session (wiring TBD).
+        if let Some(ref mcp) = state.mcp_servers {
+            tracing::info!("ACP session {}: {} MCP server(s) configured", session_id, mcp.len());
+        }
+
         // Intercept slash commands
         if user_text.starts_with('/') {
             if let Some(response_text) = handle_slash_command(&user_text, &state) {
@@ -638,6 +643,7 @@ async fn run_agent(
 
     let mut registry = ToolRegistry::new();
     hermez_tools::register_all_tools(&mut registry);
+
     let registry_arc = Arc::new(registry);
 
     let mut agent = match AIAgent::new(config, registry_arc) {

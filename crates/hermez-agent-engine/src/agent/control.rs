@@ -104,6 +104,14 @@ impl AIAgent {
             provider: self.config.provider.clone(),
         });
 
+        // Recalculate context compression budgets for the new model.
+        // Mirrors Python ContextCompressor.update_model()
+        // (context_compressor.py:301-327, run_agent.py:2143-2160).
+        if let Some(ref mut engine) = self.context_engine {
+            let context_len = hermez_prompt::context_compressor::estimate_context_length(new_model);
+            engine.update_model(new_model, Some(context_len));
+        }
+
         tracing::info!(
             "Model switched: {} ({:?}) → {} ({:?})",
             old_model, old_provider, new_model, new_provider

@@ -569,6 +569,27 @@ pub fn set_process_notify_options(
 }
 
 /// Register the process tool.
+/// Kill all tracked processes — used during gateway shutdown.
+///
+/// Iterates the process registry and sends SIGTERM to every running process.
+/// Returns the number of processes killed.
+/// Mirrors Python _kill_tool_subprocesses() (run.py:2599-2745).
+pub fn kill_all() -> usize {
+    let registry = PROCESS_REGISTRY.lock();
+    let mut count = 0;
+    for (session_id, proc) in registry.iter() {
+        if proc.running {
+            if let Some(pid) = proc.pid {
+                if kill_process_by_pid(pid) {
+                    count += 1;
+                    tracing::info!("Killed process {} (session={}) during shutdown", pid, session_id);
+                }
+            }
+        }
+    }
+    count
+}
+
 pub fn register_process_tool(registry: &mut ToolRegistry) {
     registry.register(
         "process".to_string(),

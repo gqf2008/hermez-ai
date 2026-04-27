@@ -1382,23 +1382,46 @@ async fn responses_stream_handler(
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple().to_string().chars().take(28).collect::<String>());
     let created_at = chrono::Utc::now().timestamp();
 
-    // Spawn agent run in background task
+    // Shared buffer + notify for real-time text deltas during LLM generation.
+    // Notify wakes the SSE builder only when new data arrives (no polling).
+    let streamed_deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delta_notify: std::sync::Arc<tokio::sync::Notify> =
+        std::sync::Arc::new(tokio::sync::Notify::new());
+
+    // Spawn agent run in background task with streaming support.
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<crate::runner::HandlerResult, String>>();
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let handler = state.handler.clone();
     let sess_id = session_id.clone();
     let user_msg_spawn = user_message.clone();
     tokio::spawn(async move {
         let handler_guard = handler.lock().await;
         let result = match handler_guard.as_ref() {
-            Some(h) => h.handle_message(Platform::ApiServer, &sess_id, &user_msg_spawn, None).await,
+            Some(h) => h.handle_message_streaming(
+                Platform::ApiServer, &sess_id, &user_msg_spawn, None, stream_tx
+            ).await,
             None => Err("No message handler registered".to_string()),
         };
         let _ = tx.send(result);
     });
 
-    // Build SSE stream
+    // Drain stream deltas into the shared buffer for SSE consumption.
+    let deltas_for_drain = streamed_deltas.clone();
+    let notify_for_drain = delta_notify.clone();
+    tokio::spawn(async move {
+        let mut rx = stream_rx;
+        while let Some(delta) = rx.recv().await {
+            if !delta.is_empty() {
+                deltas_for_drain.lock().unwrap().push(delta);
+                notify_for_drain.notify_one();
+            }
+        }
+    });
+
+    // Build SSE stream with real-time delta support from shared buffer + notify.
     let stream = build_responses_sse_stream(
-        rx, response_id, model, created_at, session_id,
+        rx, Some((streamed_deltas, delta_notify)), response_id, model, created_at, session_id,
         conversation_history, user_message, instructions,
         store_response, request.conversation.clone(),
     );
@@ -1418,7 +1441,8 @@ type SseResponsesStreamType = Pin<Box<dyn Stream<Item = Result<axum::response::s
 /// Emits: response.created → output_item.added (message) → output_text.delta (chunked)
 /// → output_text.done → output_item.done (message) → response.completed
 fn build_responses_sse_stream(
-    agent_rx: tokio::sync::oneshot::Receiver<Result<crate::runner::HandlerResult, String>>,
+    mut agent_rx: tokio::sync::oneshot::Receiver<Result<crate::runner::HandlerResult, String>>,
+    streamed_deltas: Option<(std::sync::Arc<std::sync::Mutex<Vec<String>>>, std::sync::Arc<tokio::sync::Notify>)>,
     response_id: String,
     model: String,
     created_at: i64,
@@ -1478,12 +1502,58 @@ fn build_responses_sse_stream(
         }));
         seq += 1;
 
-        // Wait for agent to complete
-        let agent_result = agent_rx.await;
+        // Emit real-time text deltas while agent runs.
+        // Event-driven via notify (no polling): drainer task wakes us when data arrives.
+        let mut streamed_text = String::new();
+        let mut emitted_count = 0usize;
+        let agent_result;
+        let (delta_buf, delta_notify) = match streamed_deltas {
+            Some(ref pair) => (Some(pair.0.clone()), Some(pair.1.clone())),
+            None => (None, None),
+        };
+        loop {
+            if let Some(ref notify) = delta_notify {
+                tokio::select! {
+                    res = &mut agent_rx => {
+                        agent_result = res;
+                        break;
+                    }
+                    // Wake on new data OR every 1s (catches missed notifies from race)
+                    _ = tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified()) => {
+                        if let Some(ref deltas) = delta_buf {
+                            let pending: Vec<String> = {
+                                let guard = deltas.lock().unwrap();
+                                guard[emitted_count..].to_vec()
+                            };
+                            for delta in pending {
+                                emitted_count += 1;
+                                if !delta.is_empty() {
+                                    streamed_text.push_str(&delta);
+                                    let ci: usize = 0;
+                                    yield Ok(make_event(ResponsesSseEvent::OutputTextDelta {
+                                        event_type: "response.output_text.delta".to_string(),
+                                        item_id: message_item_id.clone(),
+                                        output_index: msg_output_index,
+                                        content_index: ci,
+                                        delta,
+                                        logprobs: vec![],
+                                        sequence_number: seq,
+                                    }));
+                                    seq += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No streaming — just wait for agent
+                agent_result = agent_rx.await;
+                break;
+            }
+        }
         let (response_text, result_messages) = match agent_result {
             Ok(Ok(result)) => (result.response.clone(), result.messages.clone()),
             Ok(Err(_e)) => {
-                // Agent error — emit response.failed (simplified)
                 let error_envelope = SseResponseEnvelope {
                     id: response_id.clone(),
                     object: "response".to_string(),
@@ -1501,27 +1571,29 @@ fn build_responses_sse_stream(
                 return;
             }
             Err(_) => {
-                // Channel dropped
                 return;
             }
         };
 
-        // Emit text deltas (character-level chunks, like build_sse_stream)
-        let mut chars = response_text.chars().peekable();
-        while chars.peek().is_some() {
-            let text: String = chars.by_ref().take(3).collect();
-            if text.is_empty() { break; }
-            yield Ok(make_event(ResponsesSseEvent::OutputTextDelta {
-                event_type: "response.output_text.delta".to_string(),
-                item_id: message_item_id.clone(),
-                output_index: msg_output_index,
-                content_index: 0,
-                delta: text,
-                logprobs: vec![],
-                sequence_number: seq,
-            }));
-            seq += 1;
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        // Emit remaining text if no streaming deltas were received.
+        // When streamed_text already has content, deltas were emitted in real-time.
+        if streamed_text.is_empty() {
+            let mut chars = response_text.chars().peekable();
+            while chars.peek().is_some() {
+                let text: String = chars.by_ref().take(3).collect();
+                if text.is_empty() { break; }
+                yield Ok(make_event(ResponsesSseEvent::OutputTextDelta {
+                    event_type: "response.output_text.delta".to_string(),
+                    item_id: message_item_id.clone(),
+                    output_index: msg_output_index,
+                    content_index: 0,
+                    delta: text,
+                    logprobs: vec![],
+                    sequence_number: seq,
+                }));
+                seq += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
 
         // output_text.done

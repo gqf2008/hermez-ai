@@ -98,6 +98,48 @@ pub(crate) fn stale_call_timeout(base_url: Option<&str>, messages: &[Message]) -
     Duration::from_secs_f64(secs)
 }
 
+/// Compute stale-call timeout for streaming API calls.
+///
+/// Streaming has a separate shorter default (180s) because the provider sends
+/// keep-alive chunks. Large contexts scale up. Local endpoints are exempt.
+///
+/// Mirrors Python HERMES_STREAM_STALE_TIMEOUT + streaming stale detector
+/// (run_agent.py:6551+).
+pub(crate) fn streaming_stale_call_timeout(base_url: Option<&str>, messages: &[Message]) -> Duration {
+    const DEFAULT_STREAM: f64 = 180.0;
+
+    if let Ok(val) = std::env::var("HERMEZ_STREAM_STALE_TIMEOUT") {
+        if let Ok(secs) = val.parse::<f64>() {
+            if secs > 0.0 {
+                return Duration::from_secs_f64(secs);
+            }
+        }
+    }
+
+    // Fall back to non-streaming env var if streaming-specific is unset
+    if let Ok(val) = std::env::var("HERMEZ_API_CALL_STALE_TIMEOUT") {
+        if let Ok(secs) = val.parse::<f64>() {
+            if secs > 0.0 {
+                return Duration::from_secs_f64(secs);
+            }
+        }
+    }
+
+    if base_url.is_some_and(is_local_endpoint) {
+        return Duration::from_secs(u64::MAX);
+    }
+
+    let est_tokens = estimate_tokens(messages);
+    let secs = if est_tokens > 100_000 {
+        300.0
+    } else if est_tokens > 50_000 {
+        240.0
+    } else {
+        DEFAULT_STREAM
+    };
+    Duration::from_secs_f64(secs)
+}
+
 /// Compute exponential backoff in milliseconds based on retry count.
 ///
 /// Mirrors Python: backoff starts at 2s and doubles each retry,

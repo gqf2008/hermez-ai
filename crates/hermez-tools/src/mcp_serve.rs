@@ -21,9 +21,9 @@ use tokio::time::interval;
 
 use rmcp::{
     ServerHandler,
-    model::{ServerCapabilities, ServerInfo},
     tool,
 };
+
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -418,14 +418,14 @@ impl Default for EventBridge {
 // Tool request structs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct ConversationsListReq {
-    #[schemars(description = "Filter by platform name (telegram, discord, slack, etc.)")]
+    
     platform: Option<String>,
     #[serde(default = "default_limit_50")]
-    #[schemars(description = "Maximum number of conversations to return")]
+    
     limit: usize,
-    #[schemars(description = "Optional text to filter conversations by name")]
+    
     search: Option<String>,
 }
 
@@ -433,32 +433,32 @@ fn default_limit_50() -> usize {
     50
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct MessagesReadReq {
-    #[schemars(description = "The session key from conversations_list")]
+    
     session_key: String,
     #[serde(default = "default_limit_50")]
-    #[schemars(description = "Maximum number of messages to return")]
+    
     limit: usize,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct AttachmentsFetchReq {
-    #[schemars(description = "The session key from conversations_list")]
+    
     session_key: String,
-    #[schemars(description = "The message ID from messages_read")]
+    
     message_id: String,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct EventsPollReq {
     #[serde(default)]
-    #[schemars(description = "Return events after this cursor (0 for all)")]
+    
     after_cursor: usize,
-    #[schemars(description = "Optional filter to one conversation")]
+    
     session_key: Option<String>,
     #[serde(default = "default_limit_20")]
-    #[schemars(description = "Maximum events to return")]
+    
     limit: usize,
 }
 
@@ -466,15 +466,15 @@ fn default_limit_20() -> usize {
     20
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct EventsWaitReq {
     #[serde(default)]
-    #[schemars(description = "Wait for events after this cursor")]
+    
     after_cursor: usize,
-    #[schemars(description = "Optional filter to one conversation")]
+    
     session_key: Option<String>,
     #[serde(default = "default_timeout_30000")]
-    #[schemars(description = "Maximum wait time in milliseconds")]
+    
     timeout_ms: u64,
 }
 
@@ -482,25 +482,25 @@ fn default_timeout_30000() -> u64 {
     30000
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct MessagesSendReq {
-    #[schemars(description = "Platform target in 'platform:identifier' format")]
+    
     target: String,
-    #[schemars(description = "The message text to send")]
+    
     message: String,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct ChannelsListReq {
-    #[schemars(description = "Filter by platform name")]
+    
     platform: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 struct PermissionsRespondReq {
-    #[schemars(description = "The approval ID from permissions_list_open")]
+    
     id: String,
-    #[schemars(description = "One of allow-once, allow-always, or deny")]
+    
     decision: String,
 }
 
@@ -519,12 +519,11 @@ impl McpServer {
     }
 }
 
-#[tool(tool_box)]
 impl McpServer {
     #[tool(description = "List active messaging conversations across connected platforms.")]
     async fn conversations_list(
         &self,
-        #[tool(aggr)] req: ConversationsListReq,
+req: ConversationsListReq,
     ) -> String {
         let entries = load_sessions_index();
         let mut conversations = Vec::new();
@@ -598,8 +597,7 @@ impl McpServer {
     #[tool(description = "Get detailed info about one conversation by its session key.")]
     async fn conversation_get(
         &self,
-        #[tool(param)]
-        #[schemars(description = "The session key from conversations_list")]
+
         session_key: String,
     ) -> String {
         let entries = load_sessions_index();
@@ -640,7 +638,7 @@ impl McpServer {
     #[tool(description = "Read recent messages from a conversation.")]
     async fn messages_read(
         &self,
-        #[tool(aggr)] req: MessagesReadReq,
+req: MessagesReadReq,
     ) -> String {
         let entries = load_sessions_index();
         let entry = match entries.get(&req.session_key) {
@@ -711,7 +709,7 @@ impl McpServer {
     #[tool(description = "List non-text attachments for a message in a conversation.")]
     async fn attachments_fetch(
         &self,
-        #[tool(aggr)] req: AttachmentsFetchReq,
+req: AttachmentsFetchReq,
     ) -> String {
         let entries = load_sessions_index();
         let entry = match entries.get(&req.session_key) {
@@ -776,7 +774,7 @@ impl McpServer {
     #[tool(description = "Poll for new conversation events since a cursor position.")]
     async fn events_poll(
         &self,
-        #[tool(aggr)] req: EventsPollReq,
+req: EventsPollReq,
     ) -> String {
         let result = self
             .bridge
@@ -788,7 +786,7 @@ impl McpServer {
     #[tool(description = "Wait for the next conversation event (long-poll).")]
     async fn events_wait(
         &self,
-        #[tool(aggr)] req: EventsWaitReq,
+req: EventsWaitReq,
     ) -> String {
         let timeout_ms = req.timeout_ms.min(300000); // Cap at 5 minutes
         let event = self
@@ -806,7 +804,7 @@ impl McpServer {
     #[tool(description = "Send a message to a platform conversation.")]
     async fn messages_send(
         &self,
-        #[tool(aggr)] req: MessagesSendReq,
+req: MessagesSendReq,
     ) -> String {
         if req.target.is_empty() || req.message.is_empty() {
             return serde_json::json!({
@@ -835,7 +833,7 @@ impl McpServer {
     #[tool(description = "List available messaging channels and targets across platforms.")]
     async fn channels_list(
         &self,
-        #[tool(aggr)] req: ChannelsListReq,
+req: ChannelsListReq,
     ) -> String {
         let directory = load_channel_directory();
         let mut channels = Vec::new();
@@ -936,7 +934,7 @@ impl McpServer {
     #[tool(description = "Respond to a pending approval request.")]
     async fn permissions_respond(
         &self,
-        #[tool(aggr)] req: PermissionsRespondReq,
+req: PermissionsRespondReq,
     ) -> String {
         if !matches!(req.decision.as_str(), "allow-once" | "allow-always" | "deny") {
             return serde_json::json!({
@@ -953,21 +951,7 @@ impl McpServer {
     }
 }
 
-#[tool(tool_box)]
-impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Hermez Agent messaging bridge. Use these tools to interact with \
-                 conversations across Telegram, Discord, Slack, WhatsApp, Signal, \
-                 Matrix, and other connected platforms."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
-    }
-}
+impl ServerHandler for McpServer {}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -989,7 +973,8 @@ pub async fn run_mcp_server(verbose: bool) -> Result<(), std::io::Error> {
 
     let server = McpServer::new(bridge);
 
-    let service = rmcp::serve_server(server, rmcp::transport::stdio()).await?;
+    let service = rmcp::serve_server(server, rmcp::transport::stdio()).await
+        .map_err(|e| std::io::Error::other(e))?;
 
     // Wait for service to complete (stdio closes)
     service.waiting().await.map_err(std::io::Error::other)?;

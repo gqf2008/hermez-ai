@@ -245,6 +245,15 @@ pub fn command_names() -> Vec<String> {
 // Command execution context
 // ---------------------------------------------------------------------------
 
+/// Input handling mode when agent is busy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BusyMode {
+    /// Queue input until agent is ready.
+    Queue,
+    /// Interrupt the current turn and process new input immediately.
+    Interrupt,
+}
+
 /// Mutable context passed to slash command handlers.
 pub struct SlashContext<'a> {
     pub agent: &'a mut AIAgent,
@@ -260,6 +269,8 @@ pub struct SlashContext<'a> {
     pub yolo_mode: &'a mut bool,
     /// Whether to break the main loop (set by /quit)
     pub should_exit: &'a mut bool,
+    /// Busy mode (queue or interrupt new messages while agent is working).
+    pub busy_mode: &'a mut BusyMode,
 }
 
 /// Result of executing a slash command.
@@ -328,6 +339,7 @@ pub fn dispatch(cmd: &str, args: &str, ctx: &mut SlashContext) -> SlashResult {
         "debug" => cmd_debug(ctx),
         "profile" => cmd_profile(ctx),
         "gquota" => cmd_gquota(ctx),
+        "busy" => cmd_busy(ctx, args),
         "quit" | "exit" => cmd_quit(ctx),
         _ => SlashResult::Error(format!("Unknown command: /{cmd}")),
     }
@@ -503,10 +515,11 @@ fn cmd_queue(_ctx: &mut SlashContext, args: &str) -> SlashResult {
     }
 }
 
-fn cmd_steer(_ctx: &mut SlashContext, args: &str) -> SlashResult {
+fn cmd_steer(ctx: &mut SlashContext, args: &str) -> SlashResult {
     if args.trim().is_empty() {
         SlashResult::Error("Usage: /steer <prompt>".into())
     } else {
+        ctx.agent.set_steer(args.trim());
         println!("Steer message queued for after next tool call.");
         SlashResult::Handled
     }
@@ -703,6 +716,31 @@ fn cmd_help(_ctx: &mut SlashContext) -> SlashResult {
 
 fn cmd_usage(_ctx: &mut SlashContext) -> SlashResult {
     println!("Token usage tracking not yet implemented in Rust CLI.");
+    SlashResult::Handled
+}
+
+fn cmd_busy(ctx: &mut SlashContext, args: &str) -> SlashResult {
+    let subcommand = args.trim().to_lowercase();
+    match subcommand.as_str() {
+        "queue" | "" => {
+            *ctx.busy_mode = BusyMode::Queue;
+            println!("Busy mode: queue (input will be held until agent is ready)");
+        }
+        "interrupt" => {
+            *ctx.busy_mode = BusyMode::Interrupt;
+            println!("Busy mode: interrupt (new input will cancel current turn)");
+        }
+        "status" => {
+            let mode = match *ctx.busy_mode {
+                BusyMode::Queue => "queue",
+                BusyMode::Interrupt => "interrupt",
+            };
+            println!("Current busy mode: {mode}");
+        }
+        _ => {
+            println!("Usage: /busy [queue|interrupt|status]");
+        }
+    }
     SlashResult::Handled
 }
 

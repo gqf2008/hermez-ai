@@ -136,6 +136,18 @@ pub struct CronJob {
     /// Origin info (creation source).
     #[serde(default)]
     pub origin: Option<serde_json::Value>,
+    /// Job IDs whose output to prepend as context (job chaining).
+    /// Mirrors Python `context_from` field (cron/jobs.py, commit 5ac53659).
+    #[serde(default)]
+    pub context_from: Option<Vec<String>>,
+    /// Working directory for project-aware cron runs.
+    /// Mirrors Python per-job `workdir` (cron/jobs.py, commit 852c7f3b).
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Restrict which toolsets are available to this job.
+    /// Mirrors Python per-job `enabled_toolsets` (cron/jobs.py).
+    #[serde(default)]
+    pub enabled_toolsets: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -258,6 +270,9 @@ impl JobStore {
             last_delivery_error: None,
             deliver: "local".to_string(),
             origin: None,
+            context_from: None,
+            workdir: None,
+            enabled_toolsets: None,
         };
 
         self.jobs.insert(id, job.clone());
@@ -753,6 +768,22 @@ pub fn compute_next_run(schedule: &Schedule, last_run: Option<DateTime<Utc>>) ->
 pub fn get_output_dir(job_id: &str) -> PathBuf {
     let home = hermez_core::get_hermez_home();
     home.join("cron").join("output").join(job_id)
+}
+
+/// Load the most recent output for a job (for context_from chaining).
+/// Returns None if no output exists yet.
+/// Mirrors Python cron context_from resolution (cron/scheduler.py, commit 5ac53659).
+pub fn load_job_output(job_id: &str) -> Option<String> {
+    let dir = get_output_dir(job_id);
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+        .collect();
+    // Sort by name descending (most recent first)
+    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let latest = files.first()?;
+    std::fs::read_to_string(latest.path()).ok()
 }
 
 /// Save job output to a file.

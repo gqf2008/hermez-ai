@@ -61,6 +61,11 @@ impl ApprovalRegistry {
 /// If the session is stale (older than `STALE_SESSION_TIMEOUT_SECS`),
 /// removes it from both `sessions` and `busy_ack_ts` and returns `None`.
 /// Returns `Some(elapsed_minutes)` if the session is active.
+/// Sentinel value inserted before awaiting the handler lock,
+/// so concurrent messages for the same session detect it as "pending".
+/// Mirrors Python _AGENT_PENDING_SENTINEL (run.py:315).
+const AGENT_PENDING_SENTINEL: f64 = -1.0;
+
 fn check_busy_session(
     sessions: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
     busy_ack_ts: &Arc<parking_lot::Mutex<HashMap<String, f64>>>,
@@ -73,6 +78,10 @@ fn check_busy_session(
     let stale = {
         let mut sessions = sessions.lock();
         if let Some(&start_ts) = sessions.get(chat_id) {
+            // Sentinel value means an agent is being spawned — treat as busy.
+            if start_ts == AGENT_PENDING_SENTINEL {
+                return Some(0.0);
+            }
             let elapsed_secs = now - start_ts;
             if elapsed_secs > STALE_SESSION_TIMEOUT_SECS {
                 sessions.remove(chat_id);
@@ -176,20 +185,37 @@ pub trait MessageHandler: Send + Sync + 'static {
         model_override: Option<&str>,
     ) -> Result<HandlerResult, String>;
 
+    /// Handle a message with streaming support.
+    /// Default implementation calls handle_message without streaming.
+    /// Override to push text deltas during LLM generation.
+    async fn handle_message_streaming(
+        &self,
+        platform: Platform,
+        chat_id: &str,
+        content: &str,
+        model_override: Option<&str>,
+        _stream_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<HandlerResult, String> {
+        self.handle_message(platform, chat_id, content, model_override).await
+    }
+
     /// Signal the handler to interrupt its current conversation turn.
     /// Default is no-op for handlers that don't support interruption.
-    /// Mirrors Python PR a8b7db35 — immediate interrupt on user message.
     fn interrupt(&self, _chat_id: &str, _new_message: &str) {
+        // no-op by default
+    }
+
+    /// Flush memory providers for the given session before shutdown.
+    /// Default is no-op; concrete handlers should override.
+    fn flush_memories(&self, _chat_id: &str) {
         // no-op by default
     }
 
     /// Run the agent with a custom prompt (used by platform-specific flows
     /// like Feishu document comments that need special toolsets and prompts).
-    ///
-    /// Default implementation returns an error; handlers that support
-    /// custom-prompt execution should override this.
+    /// Override to customize toolset selection or agent configuration.
     async fn run_with_prompt(&self, _prompt: &str) -> Result<String, String> {
-        Err("Custom prompt execution not supported by this handler".to_string())
+        Err("run_with_prompt not implemented by this handler".to_string())
     }
 
     /// Register a pending approval for the given session key.
@@ -229,6 +255,77 @@ async fn health_handler(
         "platforms": platforms,
     });
     axum::Json(body)
+}
+
+/// Default message handler that creates AIAgent instances for message processing.
+pub struct DefaultMessageHandler {
+    pub default_model: String,
+}
+
+impl DefaultMessageHandler {
+    pub fn new(default_model: String) -> Self {
+        Self { default_model }
+    }
+}
+
+impl DefaultMessageHandler {
+    fn create_agent(
+        &self,
+        max_iterations: usize,
+        skip_context_files: bool,
+    ) -> Result<hermez_agent_engine::AIAgent, String> {
+        let config = hermez_agent_engine::agent::AgentConfig {
+            model: self.default_model.clone(),
+            max_iterations,
+            skip_context_files,
+            ..Default::default()
+        };
+        let mut registry = hermez_tools::registry::ToolRegistry::new();
+        hermez_tools::register_all_tools(&mut registry);
+        hermez_agent_engine::AIAgent::new(config, std::sync::Arc::new(registry))
+            .map_err(|e| format!("Agent init: {e}"))
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageHandler for DefaultMessageHandler {
+    async fn handle_message(
+        &self, _platform: Platform, _chat_id: &str, content: &str, _model_override: Option<&str>,
+    ) -> Result<HandlerResult, String> {
+        let mut agent = self.create_agent(90, false)?;
+        let result = agent.run_conversation(content, None, None).await;
+        Ok(HandlerResult {
+            response: result.response.clone(),
+            messages: result.messages.iter().map(|m| (**m).clone()).collect(),
+            compression_exhausted: result.compression_exhausted,
+            usage: None, already_sent: false,
+        })
+    }
+
+    async fn handle_message_streaming(
+        &self, _platform: Platform, _chat_id: &str, content: &str, _model_override: Option<&str>,
+        stream_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<HandlerResult, String> {
+        let mut agent = self.create_agent(90, false)?;
+        agent.set_stream_callback(move |text: &str| { let _ = stream_tx.send(text.to_string()); });
+        let result = agent.run_conversation(content, None, None).await;
+        Ok(HandlerResult {
+            response: result.response.clone(),
+            messages: result.messages.iter().map(|m| (**m).clone()).collect(),
+            compression_exhausted: result.compression_exhausted,
+            usage: None, already_sent: true,
+        })
+    }
+
+    async fn run_with_prompt(&self, prompt: &str) -> Result<String, String> {
+        let mut agent = self.create_agent(50, true)?;
+        let result = agent.run_conversation(prompt, None, None).await;
+        if result.response.is_empty() {
+            Err("Agent returned empty response".to_string())
+        } else {
+            Ok(result.response)
+        }
+    }
 }
 
 /// Gateway runner managing platform adapter lifecycles.
@@ -824,8 +921,7 @@ impl GatewayRunner {
                                             user_name: None,
                                             thread_id: event.thread_ts.clone(),
                                             chat_topic: None,
-                                            user_id_alt: None,
-                                            chat_id_alt: None,
+                                            ..Default::default()
                                         };
                                         session_store.reset_session_for(&source);
                                         let _ = adapter.send_text(chat_id,
@@ -993,8 +1089,7 @@ impl GatewayRunner {
                                                         user_name: None,
                                                         thread_id: None,
                                                         chat_topic: None,
-                                                        user_id_alt: None,
-                                                        chat_id_alt: None,
+                                                        ..Default::default()
                                                     };
                                                     session_store.reset_session_for(&source);
                                                     let _ = adapter.send_text(chat_id,
@@ -1176,8 +1271,7 @@ impl GatewayRunner {
                                                         user_name: None,
                                                         thread_id: None,
                                                         chat_topic: None,
-                                                        user_id_alt: None,
-                                                        chat_id_alt: None,
+                                                        ..Default::default()
                                                     };
                                                     session_store.reset_session_for(&source);
                                                     let _ = adapter.send_text(chat_id,
@@ -1578,6 +1672,21 @@ impl GatewayRunner {
         if let Some(tx) = self.health_check_shutdown_tx.take() {
             let _ = tx.send(());
         }
+        // Kill tool subprocesses before clearing session state.
+        // Mirrors Python _kill_tool_subprocesses() (run.py:2599-2745).
+        let killed = hermez_tools::process_reg::kill_all();
+        if killed > 0 {
+            info!("Killed {} tool subprocess(es) during shutdown", killed);
+        }
+
+        // Drain active sessions: log count, clear session state.
+        // Note: resume_pending requires full session_key format; running_sessions
+        // keys are chat_id. Deferred until session_key tracking is added.
+        let active_count = self.running_sessions.lock().len();
+        if active_count > 0 {
+            info!("Draining {} active session(s) on shutdown", active_count);
+        }
+
         self.running.store(false, Ordering::SeqCst);
         self.running_sessions.lock().clear();
         self.busy_ack_ts.lock().clear();
@@ -1709,8 +1818,7 @@ fn command_ctx<'a>(
             user_name: None,
             thread_id,
             chat_topic: None,
-            user_id_alt: None,
-            chat_id_alt: None,
+            ..Default::default()
         },
         session_store,
         running_sessions,
@@ -2044,8 +2152,7 @@ async fn route_weixin_message(
                     user_name: None,
                     thread_id: None,
                     chat_topic: None,
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
@@ -2248,8 +2355,7 @@ async fn route_telegram_message(
                     user_name: None,
                     thread_id: event.message_thread_id.map(|id| id.to_string()),
                     chat_topic: None,
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
@@ -2694,8 +2800,7 @@ async fn route_whatsapp_message(
                     user_name: None,
                     thread_id: None,
                     chat_topic: None,
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
@@ -2902,8 +3007,7 @@ async fn route_email_message(
                     user_name: Some(event.sender_name.clone()),
                     thread_id: event.in_reply_to.clone(),
                     chat_topic: Some(event.subject.clone()),
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");
@@ -3114,8 +3218,7 @@ async fn route_qqbot_message(
                     user_name: event.user_name.clone(),
                     thread_id: None,
                     chat_topic: None,
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 warn!("Session {chat_id}: compression exhausted — auto-reset performed");

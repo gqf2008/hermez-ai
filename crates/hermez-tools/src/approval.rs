@@ -7,7 +7,7 @@
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use crate::registry::{tool_error, ToolRegistry};
 
@@ -300,15 +300,31 @@ pub fn evaluate_command(
                 };
             }
             if let Some(reason) = detect_dangerous_command(cmd) {
-                CommandEvaluation {
+                return CommandEvaluation {
                     approved: false,
                     reason: Some(format!("Dangerous command detected: {}", reason)),
                     dangerous: true,
+                };
+            }
+            // Run smart approval via auxiliary LLM callback if available.
+            if let Some(safe) = run_smart_approval(cmd) {
+                if safe {
+                    CommandEvaluation {
+                        approved: true,
+                        reason: Some("Smart approval: command appears safe".to_string()),
+                        dangerous: false,
+                    }
+                } else {
+                    CommandEvaluation {
+                        approved: false,
+                        reason: Some("Smart approval: command flagged as risky".to_string()),
+                        dangerous: true,
+                    }
                 }
             } else {
                 CommandEvaluation {
                     approved: true,
-                    reason: Some("Command appears safe".to_string()),
+                    reason: Some("Command appears safe (no smart approval callback)".to_string()),
                     dangerous: false,
                 }
             }
@@ -325,6 +341,27 @@ pub struct CommandEvaluation {
     pub reason: Option<String>,
     /// Whether the command matched a dangerous pattern.
     pub dangerous: bool,
+}
+
+/// LLM-based risk assessor for smart approval mode.
+/// When set, called to evaluate borderline commands with an auxiliary model.
+/// Mirrors Python smart approval via auxiliary LLM (tools/approval.py).
+pub type SmartApprovalFn = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+
+/// Global smart approval callback (set by the agent engine or CLI).
+static SMART_APPROVAL_CB: once_cell::sync::Lazy<parking_lot::Mutex<Option<SmartApprovalFn>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Register a smart approval callback for LLM-based risk assessment.
+pub fn set_smart_approval_cb(cb: Option<SmartApprovalFn>) {
+    *SMART_APPROVAL_CB.lock() = cb;
+}
+
+/// Run smart approval check via registered callback (if any).
+/// Returns Some(true) if command appears safe, Some(false) if dangerous,
+/// None if no callback is registered.
+pub fn run_smart_approval(cmd: &str) -> Option<bool> {
+    SMART_APPROVAL_CB.lock().as_ref().and_then(|cb| cb(cmd))
 }
 
 // ---------------------------------------------------------------------------

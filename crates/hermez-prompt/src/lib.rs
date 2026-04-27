@@ -7,14 +7,14 @@
 
 pub(crate) mod builder;
 pub(crate) mod cache_control;
-pub(crate) mod context_compressor;
+pub mod context_compressor;
 pub(crate) mod context_engine;
 pub(crate) mod context_references;
 pub(crate) mod injection_scan;
 pub(crate) mod skills_prompt;
 pub(crate) mod manual_compression_feedback;
 pub(crate) mod soul;
-pub(crate) mod subdirectory_hints;
+pub mod subdirectory_hints;
 
 // Re-export main public types for convenience.
 pub use builder::{
@@ -25,7 +25,7 @@ pub use builder::{
     TOOL_USE_ENFORCEMENT_MODELS, DEFAULT_AGENT_IDENTITY,
 };
 pub use cache_control::{apply_anthropic_cache_control, CacheTtl};
-pub use context_compressor::{CompressorConfig, ContextCompressor};
+pub use context_compressor::{CompressorConfig, ContextCompressor, estimate_context_length};
 pub use context_engine::{ContextEngine, create_engine, available_engines};
 pub use injection_scan::{sanitize_context_content, scan_context_content};
 pub use skills_prompt::build_skills_system_prompt;

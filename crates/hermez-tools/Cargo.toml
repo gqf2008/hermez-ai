@@ -38,12 +38,15 @@ url.workspace = true
 ipnet = "2"
 serde_yaml.workspace = true
 sha2.workspace = true
+rand.workspace = true
+webbrowser = "1.0"
 md5 = "0.7"
 dirs.workspace = true
 base64 = "0.22.1"
 bollard.workspace = true
+tokio-tungstenite = "0.24"
 futures-util = "0.3"
-rmcp = { workspace = true, features = ["client", "server", "macros", "transport-child-process", "transport-io"] }
+rmcp = { workspace = true, features = ["client", "server", "macros", "transport-child-process", "transport-io", "client-side-sse", "transport-streamable-http-client-reqwest"] }
 schemars = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 unicode-normalization = "0.1"

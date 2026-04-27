@@ -24,6 +24,7 @@ pub enum FailoverReason {
     PayloadTooLarge,
     ModelNotFound,
     FormatError,
+    ProviderPolicyBlocked,
     ThinkingSignature,
     LongContextTier,
     Unknown,
@@ -43,6 +44,7 @@ impl std::fmt::Display for FailoverReason {
             FailoverReason::PayloadTooLarge => write!(f, "payload_too_large"),
             FailoverReason::ModelNotFound => write!(f, "model_not_found"),
             FailoverReason::FormatError => write!(f, "format_error"),
+            FailoverReason::ProviderPolicyBlocked => write!(f, "provider_policy_blocked"),
             FailoverReason::ThinkingSignature => write!(f, "thinking_signature"),
             FailoverReason::LongContextTier => write!(f, "long_context_tier"),
             FailoverReason::Unknown => write!(f, "unknown"),
@@ -242,6 +244,7 @@ const H_CONTEXT_OVERFLOW: ActionHints = ActionHints { retryable: true, should_co
 const H_PAYLOAD_TOO_LARGE: ActionHints = ActionHints { retryable: true, should_compress: true, should_rotate_credential: false, should_fallback: false };
 const H_MODEL_NOT_FOUND: ActionHints = ActionHints { retryable: false, should_compress: false, should_rotate_credential: false, should_fallback: true };
 const H_FORMAT_ERROR: ActionHints = ActionHints { retryable: false, should_compress: false, should_rotate_credential: false, should_fallback: true };
+const H_PROVIDER_POLICY_BLOCKED: ActionHints = ActionHints { retryable: false, should_compress: false, should_rotate_credential: false, should_fallback: false };
 
 /// Returns (reason, action_hints) or None if status code not recognized.
 fn classify_by_status(
@@ -265,7 +268,13 @@ fn classify_by_status(
 
         402 => Some(classify_402(msg)),
 
-        404 => Some((FailoverReason::ModelNotFound, H_MODEL_NOT_FOUND)),
+        404 => {
+            if has_any_pattern(msg, PROVIDER_POLICY_BLOCKED_PATTERNS) {
+                Some((FailoverReason::ProviderPolicyBlocked, H_PROVIDER_POLICY_BLOCKED))
+            } else {
+                Some((FailoverReason::ModelNotFound, H_MODEL_NOT_FOUND))
+            }
+        }
 
         413 => Some((FailoverReason::PayloadTooLarge, H_PAYLOAD_TOO_LARGE)),
 
@@ -393,6 +402,11 @@ fn classify_by_message(
     // Auth patterns
     if has_any_pattern(msg, AUTH_PATTERNS) {
         return Some((FailoverReason::Auth, H_AUTH));
+    }
+
+    // Provider policy blocked (OpenRouter privacy guardrail 404)
+    if has_any_pattern(msg, PROVIDER_POLICY_BLOCKED_PATTERNS) {
+        return Some((FailoverReason::ProviderPolicyBlocked, H_PROVIDER_POLICY_BLOCKED));
     }
 
     // Model not found patterns
@@ -536,6 +550,13 @@ const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
     "max input token",
     "input token",
     "exceeds the maximum number of input tokens",
+];
+
+/// OpenRouter provider policy block patterns.
+const PROVIDER_POLICY_BLOCKED_PATTERNS: &[&str] = &[
+    "no endpoints available matching your guardrail",
+    "no endpoints available matching your data policy",
+    "no endpoints found matching your data policy",
 ];
 
 /// Model not found patterns.

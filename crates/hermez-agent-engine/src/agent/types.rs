@@ -149,6 +149,10 @@ pub struct AgentConfig {
     pub persist_session: bool,
     /// Tool-use enforcement mode for prompt builder.
     pub tool_use_enforcement: hermez_prompt::ToolUseEnforcement,
+    /// Tool progress callback: (event, tool_name, args_preview, duration).
+    pub tool_progress_cb: Option<Arc<dyn Fn(&str, &str, &str, Option<f64>) + Send + Sync>>,
+    /// Tool completion callback: (tool_name, result_content, duration, is_error).
+    pub tool_complete_cb: Option<Arc<dyn Fn(&str, &str, f64, bool) + Send + Sync>>,
 }
 
 /// Fallback provider configuration.
@@ -188,6 +192,8 @@ impl Default for AgentConfig {
             session_db: None,
             persist_session: true,
             tool_use_enforcement: hermez_prompt::ToolUseEnforcement::Auto,
+            tool_progress_cb: None,
+            tool_complete_cb: None,
         }
     }
 }

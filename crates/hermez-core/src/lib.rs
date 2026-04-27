@@ -29,5 +29,5 @@ pub use env_loader::{load_dotenv_override, load_hermez_dotenv};
 pub use errors::{ApiErrorDetails, ErrorCategory, HermezError, Result};
 pub use hermez_home::{display_hermez_home, get_hermez_home, get_hermez_dir, get_default_hermez_root};
 pub use proxy_validation::{validate_base_url, validate_proxy_env_urls};
-pub use redact::redact_sensitive_text;
+pub use redact::{redact_sensitive_text, redact_for_log};
 pub use text_utils::strip_think_blocks;

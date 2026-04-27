@@ -114,6 +114,20 @@ static SIGNAL_PHONE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(\+[1-9]\d{6,14})").unwrap()
 });
 
+/// URL query params with sensitive values (access_token, code, api_key, etc.).
+/// Mirrors Python _redact_url_query_params() (redact.py).
+static URL_QUERY_PARAM_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(\b(?:https?|wss?)://[^?\s]*\?[^?\s]*)(?:\b(?:access_token|token|api_key|apikey|key|secret|password|code|auth|client_secret|refresh_token)=)([^&\s]+)"
+    ).unwrap()
+});
+
+/// URL userinfo (user:password@host) redaction.
+/// Mirrors Python _redact_url_userinfo() (redact.py).
+static URL_USERINFO_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"((?:https?|wss?|ftp)://)([^:@/\s]+):([^@/\s]+)(@)").unwrap()
+});
+
 /// Mask a token, preserving prefix for long tokens.
 fn mask_token(token: &str) -> String {
     if token.len() < 18 {
@@ -211,6 +225,20 @@ pub fn redact_sensitive_text(text: &str) -> String {
             } else {
                 format!("{}****{}", &phone[..4], &phone[phone.len() - 4..])
             }
+        })
+        .to_string();
+
+    // URL query params with sensitive values (access_token, key, etc.)
+    result = URL_QUERY_PARAM_RE
+        .replace_all(&result, |caps: &regex::Captures| {
+            format!("{}***", &caps[1])
+        })
+        .to_string();
+
+    // URL userinfo (user:password@host)
+    result = URL_USERINFO_RE
+        .replace_all(&result, |caps: &regex::Captures| {
+            format!("{}{}:***{}", &caps[1], &caps[2], &caps[4])
         })
         .to_string();
 
@@ -313,4 +341,21 @@ mod tests {
         assert!(result.contains("<@!***>"));
         assert!(!result.contains("123456789012345678"));
     }
+
+    #[test]
+    fn test_redact_url_userinfo() {
+        let text = "Connect to https://user:password123@example.com/api";
+        let result = redact_sensitive_text(text);
+        assert!(!result.contains("password123"));
+    }
+}
+
+/// Redact sensitive data from a string for logging purposes.
+/// Convenience wrapper around `redact_sensitive_text` that handles empty strings.
+/// Mirrors Python RedactingFormatter pattern (agent/redact.py).
+pub fn redact_for_log(text: &str) -> String {
+    if text.is_empty() {
+        return text.to_string();
+    }
+    redact_sensitive_text(text)
 }

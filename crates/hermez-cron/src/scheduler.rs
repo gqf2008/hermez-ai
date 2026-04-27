@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use hermez_core::{HermezError, Result};
 
-use crate::jobs::{JobStore, save_job_output};
+use crate::jobs::{JobStore, load_job_output, save_job_output};
 
 /// Run the scheduler tick loop.
 ///
@@ -92,8 +92,16 @@ async fn tick(store: &mut JobStore, _verbose: bool) -> usize {
         let job = store.get(&job_id).cloned();
         let Some(job) = job else { continue };
 
+        // Resolve context_from: fetch prior job outputs for chaining
+        let context_from: Option<String> = job.context_from.as_ref().and_then(|ids| {
+            let parts: Vec<_> = ids.iter().filter_map(|id| {
+                if !id.chars().all(|c| c.is_ascii_hexdigit()) { return None; }
+                load_job_output(id)
+            }).collect();
+            if parts.is_empty() { None } else { Some(parts.join("\n\n---\n\n")) }
+        });
         // Execute the job
-        let result = run_job(&job).await;
+        let result = run_job(&job, context_from.as_deref()).await;
 
         // Save output
         let (success, output, final_response, error) = match result {
@@ -146,38 +154,76 @@ async fn tick(store: &mut JobStore, _verbose: bool) -> usize {
 
 /// Execute a single cron job.
 ///
+/// If `context_from_output` is provided, prepends it to the job prompt.
 /// Returns (success, full_output, final_response, error).
-async fn run_job(job: &crate::jobs::CronJob) -> Result<(bool, String, String, Option<String>)> {
+async fn run_job(
+    job: &crate::jobs::CronJob,
+    context_from_output: Option<&str>,
+) -> Result<(bool, String, String, Option<String>)> {
     tracing::info!("Running cron job: {} ({})", job.name, job.id);
 
-    // Build the prompt: script output + cron guidance + skills + user prompt
+    // Build prompt with optional context_from chaining
     let prompt = build_job_prompt(job);
+    let mut final_prompt = String::new();
+    if let Some(ctx) = context_from_output {
+        if !ctx.is_empty() {
+            final_prompt.push_str("[Context from prior job:\\n");
+            final_prompt.push_str(ctx);
+            final_prompt.push_str("\\n]\\n\\n");
+        }
+    }
+    final_prompt.push_str(&prompt);
 
-    // Build agent config
     let model = job.model.clone().unwrap_or_else(|| "anthropic/claude-opus-4.6".to_string());
+    let workdir = job.workdir.clone().map(std::path::PathBuf::from);
     let config = hermez_agent_engine::agent::AgentConfig {
         model,
-        provider: job.provider.clone(),
-        base_url: job.base_url.clone(),
+        provider: job.provider.clone(), base_url: job.base_url.clone(),
         max_iterations: 50,
-        skip_context_files: true,
+        skip_context_files: workdir.is_none(),
         platform: Some("cron".to_string()),
+        terminal_cwd: workdir,
         ..hermez_agent_engine::agent::AgentConfig::default()
     };
 
-    // Build tool registry — disable cronjob, messaging, clarify toolsets for cron
+    // Disable cronjob, messaging, clarify; apply per-job toolset filter
     let mut registry = hermez_tools::registry::ToolRegistry::new();
     hermez_tools::register_all_tools(&mut registry);
+    for t in &["cronjob", "messaging", "clarify"] { registry.remove(t); }
+    if let Some(ref toolsets) = job.enabled_toolsets {
+        let mut f = hermez_tools::registry::ToolRegistry::new();
+        for name in registry.list_tools() {
+            if let Some(e) = registry.get(&name) {
+                if toolsets.iter().any(|ts| e.toolset == *ts) {
+                    if let Some(h) = registry.get_handler(&name) {
+                        f.register(name, e.toolset.clone(), (*e.schema).clone(), h,
+                            None, vec![e.toolset.clone()], e.description.clone(), e.emoji.clone(), e.max_result_size_chars);
+                    }
+                }
+            }
+        }
+        registry = f;
+    }
 
     let mut agent = hermez_agent_engine::AIAgent::new(config, Arc::new(registry))
         .map_err(|e| HermezError::new(hermez_core::errors::ErrorCategory::InternalError, e.to_string()))?;
 
-    // Run with timeout
-    let turn_result = tokio::time::timeout(
-        std::time::Duration::from_secs(600), // 10 min default timeout
-        agent.run_conversation(&prompt, None, None),
-    )
-    .await;
+    // Inactivity-based timeout: reset timer when agent shows activity
+    let activity_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let activity_flag = activity_seen.clone();
+    agent.set_activity_callback(move |_desc: &str| { activity_flag.store(true, std::sync::atomic::Ordering::SeqCst); });
+    let idle_timeout = std::time::Duration::from_secs(600);
+    let agent_fut = agent.run_conversation(&final_prompt, None, None);
+    tokio::pin!(agent_fut);
+    let turn_result: std::result::Result<hermez_agent_engine::agent::TurnResult, HermezError> = loop {
+        tokio::select! {
+            result = &mut agent_fut => { break Ok(result); }
+            _ = tokio::time::sleep(idle_timeout) => {
+                if activity_seen.swap(false, std::sync::atomic::Ordering::SeqCst) { continue; }
+                break Err(HermezError::new(hermez_core::errors::ErrorCategory::InternalError, "Cron job timed out (no activity for 600s)".to_string()));
+            }
+        }
+    };
 
     match turn_result {
         Ok(result) => {

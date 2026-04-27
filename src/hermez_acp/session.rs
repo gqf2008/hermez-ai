@@ -10,12 +10,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// MCP server configuration for ACP sessions.
+#[derive(Debug, Clone)]
+pub struct AcpMcpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+}
+
 /// Running state for a single ACP session.
 pub struct SessionState {
     pub session_id: String,
     pub cwd: String,
     /// Cancel signal for the running agent.
     pub cancelled: Arc<RwLock<bool>>,
+    /// MCP servers to register for this session.
+    /// Mirrors Python _register_session_mcp_servers() (acp_adapter/server.py).
+    pub mcp_servers: Option<Vec<AcpMcpServerConfig>>,
 }
 
 /// Thread-safe session manager.
@@ -36,6 +48,7 @@ impl SessionManager {
             session_id: Uuid::new_v4().to_string(),
             cwd: cwd.to_string(),
             cancelled: Arc::new(RwLock::new(false)),
+            mcp_servers: None,
         });
         self.sessions
             .write()
@@ -62,6 +75,7 @@ impl SessionManager {
                 session_id: state.session_id.clone(),
                 cwd: cwd.to_string(),
                 cancelled: state.cancelled.clone(),
+                mcp_servers: state.mcp_servers.clone(),
             });
             sessions.insert(session_id.to_string(), new_state.clone());
             Some(new_state)
@@ -78,6 +92,7 @@ impl SessionManager {
             session_id: Uuid::new_v4().to_string(),
             cwd: cwd.to_string(),
             cancelled: Arc::new(RwLock::new(false)),
+            mcp_servers: None,
         });
         drop(sessions);
         self.sessions

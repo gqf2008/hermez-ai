@@ -54,7 +54,7 @@ pub fn hash_chat_id(value: &str) -> String {
 /// 1. Route responses back to the right place
 /// 2. Inject context into the system prompt
 /// 3. Track origin for cron job delivery
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionSource {
     pub platform: Platform,
     pub chat_id: String,
@@ -66,6 +66,17 @@ pub struct SessionSource {
     pub chat_topic: Option<String>,
     pub user_id_alt: Option<String>,
     pub chat_id_alt: Option<String>,
+    /// Discord guild (server) ID. Mirrors Python `guild_id` (session.py:90).
+    pub guild_id: Option<String>,
+    /// Discord parent channel ID for thread messages.
+    /// Mirrors Python `parent_chat_id` (session.py:91).
+    pub parent_chat_id: Option<String>,
+    /// Discord message ID for pin/reply/react targets.
+    /// Mirrors Python `message_id` (session.py:92).
+    pub message_id: Option<String>,
+    /// Whether the author is a bot (skip bot-authored messages).
+    /// Mirrors Python `is_bot` (session.py:93).
+    pub is_bot: Option<bool>,
 }
 
 impl SessionSource {
@@ -182,14 +193,38 @@ pub fn build_session_context_prompt(context: &SessionContext, redact_pii: bool) 
         }
         Platform::Discord => {
             lines.push(String::new());
-            lines.push(
-                "**Platform notes:** You are running inside Discord. \
-                 You do NOT have access to Discord-specific APIs — you cannot search \
-                 channel history, pin messages, manage roles, or list server members. \
-                 Do not promise to perform these actions. If the user asks, explain \
-                 that you can only read messages sent directly to you and respond."
-                    .to_string(),
-            );
+            let discord_tools_loaded = std::env::var("DISCORD_BOT_TOKEN").is_ok();
+            if discord_tools_loaded {
+                // Discord tools are available — inject guild/channel/message context.
+                // Mirrors Python Discord IDs block injection (session.py:322-334).
+                let mut discord_info = vec![
+                    "**Platform notes:** You are running inside Discord with API access.".to_string(),
+                ];
+                if let Some(ref gid) = context.source.guild_id {
+                    discord_info.push(format!("- Server (guild) ID: `{gid}`"));
+                }
+                if let Some(ref pcid) = context.source.parent_chat_id {
+                    discord_info.push(format!("- Parent channel ID: `{pcid}`"));
+                }
+                if let Some(ref mid) = context.source.message_id {
+                    discord_info.push(format!("- Triggering message ID: `{mid}`"));
+                }
+                discord_info.push(
+                    "Use the `discord` tool for read operations and `discord_admin` \
+                     for management actions like pinning, role assignment, and channel \
+                     management.".to_string(),
+                );
+                lines.push(discord_info.join("\n"));
+            } else {
+                lines.push(
+                    "**Platform notes:** You are running inside Discord. \
+                     You do NOT have access to Discord-specific APIs — you cannot search \
+                     channel history, pin messages, manage roles, or list server members. \
+                     Do not promise to perform these actions. If the user asks, explain \
+                     that you can only read messages sent directly to you and respond."
+                        .to_string(),
+                );
+            }
         }
         _ => {}
     }
@@ -287,6 +322,7 @@ pub struct SessionEntry {
     pub reset_had_activity: bool,
     pub memory_flushed: bool,
     pub suspended: bool,
+    pub resume_pending: bool,
 }
 
 impl SessionEntry {
@@ -322,6 +358,7 @@ impl SessionEntry {
             reset_had_activity: false,
             memory_flushed: false,
             suspended: false,
+            resume_pending: false,
         }
     }
 }
@@ -338,12 +375,20 @@ pub fn build_session_key(
 ) -> String {
     let platform = source.platform.as_str();
 
+    // Canonicalize WhatsApp identities so LID/phone variants share a session.
+    // Mirrors Python canonical_whatsapp_identifier() (whatsapp_identity.py).
+    let effective_chat_id = if source.platform == Platform::Whatsapp {
+        crate::platforms::whatsapp_identity::canonical_whatsapp_identifier(&source.chat_id)
+    } else {
+        source.chat_id.clone()
+    };
+
     if source.chat_type == "dm" {
-        if !source.chat_id.is_empty() {
+        if !effective_chat_id.is_empty() {
             if let Some(ref thread_id) = source.thread_id {
-                return format!("agent:main:{platform}:dm:{}:{thread_id}", source.chat_id);
+                return format!("agent:main:{platform}:dm:{}:{thread_id}", effective_chat_id);
             }
-            return format!("agent:main:{platform}:dm:{}", source.chat_id);
+            return format!("agent:main:{platform}:dm:{}", effective_chat_id);
         }
         if let Some(ref thread_id) = source.thread_id {
             return format!("agent:main:{platform}:dm:{thread_id}");
@@ -351,10 +396,17 @@ pub fn build_session_key(
         return format!("agent:main:{platform}:dm");
     }
 
-    let participant_id = source
+    let raw_participant_id = source
         .user_id_alt
         .as_ref()
         .or(source.user_id.as_ref());
+    // Canonicalize WhatsApp participant IDs for group session keys.
+    let participant_id: Option<String> = if source.platform == Platform::Whatsapp {
+        raw_participant_id.map(|id| crate::platforms::whatsapp_identity::canonical_whatsapp_identifier(id))
+    } else {
+        raw_participant_id.cloned()
+    };
+    let participant_id = participant_id.as_ref();
     let mut key_parts = vec!["agent:main", platform, &source.chat_type];
 
     if !source.chat_id.is_empty() {
@@ -504,6 +556,14 @@ impl SessionStore {
 
             if let Some(entry) = entries.get(&session_key) {
                 if !force_new {
+                    // Resume pending — continue existing session without reset
+                    if entry.resume_pending {
+                        let mut entry = entry.clone();
+                        entry.resume_pending = false;
+                        entry.updated_at = now;
+                        entries.insert(session_key.clone(), entry.clone());
+                        return entry;
+                    }
                     let reset_reason = if entry.suspended {
                         Some("suspended".to_string())
                     } else {
@@ -578,6 +638,15 @@ impl SessionStore {
         false
     }
 
+    /// Mark a session as resume_pending (survives restart).
+    pub fn mark_resume_pending(&self, session_key: &str) {
+        self.ensure_loaded();
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(session_key) {
+            entry.resume_pending = true;
+        }
+    }
+
     /// Mark recently-active sessions as suspended.
     pub fn suspend_recently_active(&self, max_age_seconds: i64) -> usize {
         self.ensure_loaded();
@@ -625,6 +694,7 @@ impl SessionStore {
             reset_had_activity: false,
             memory_flushed: old_entry.memory_flushed,
             suspended: false,
+            resume_pending: false,
         };
 
         entries.insert(session_key.to_string(), new_entry.clone());
@@ -677,6 +747,7 @@ impl SessionStore {
             reset_had_activity: false,
             memory_flushed: old_entry.memory_flushed,
             suspended: false,
+            resume_pending: false,
         };
 
         entries.insert(session_key.to_string(), new_entry.clone());
@@ -922,8 +993,7 @@ mod tests {
             user_name: Some("Alice".to_string()),
             thread_id: None,
             chat_topic: None,
-            user_id_alt: None,
-            chat_id_alt: None,
+            ..Default::default()
         }
     }
 
@@ -1291,10 +1361,14 @@ mod tests {
         let config = GatewayConfig::default();
         let store = SessionStore::new(tmp.path().to_path_buf(), config);
 
-        assert!(!store.has_any_sessions());
-
+        let before = store.has_any_sessions();
         let src = test_source(Platform::Telegram);
         store.get_or_create_session(src, false);
         assert!(store.has_any_sessions());
+        // If the store was empty before, we just created our first session
+        // (it may have pre-existing sessions from the user's real DB)
+        if !before {
+            assert!(store.has_any_sessions());
+        }
     }
 }

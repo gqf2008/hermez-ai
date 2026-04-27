@@ -9,9 +9,7 @@
 
 #![allow(dead_code)]
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -101,7 +99,7 @@ impl StdioTransport {
             )))?;
 
         let stdout_reader = BufReader::new(stdout);
-        let (response_tx, response_rx) = mpsc::unbounded_channel();
+        let (_response_tx, response_rx) = mpsc::unbounded_channel();
 
         let transport = Self {
             stdin,

@@ -4,6 +4,8 @@
 //! Uses the `rmcp` crate for stdio transport to MCP servers.
 //! Supports connecting to external MCP servers, listing their tools, and calling them.
 
+pub mod oauth;
+pub mod schema_normalize;
 pub mod security;
 pub mod server;
 
@@ -98,6 +100,7 @@ fn mcp_connect(args: &Value) -> Result<String, hermez_core::HermezError> {
         args: cmd_args,
         env,
         timeout: args.get("timeout").and_then(Value::as_u64).unwrap_or(120),
+        strip_auth_on_redirect: false,
     };
 
     let mut servers = MCP_SERVERS.lock().unwrap();

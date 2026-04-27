@@ -478,7 +478,23 @@ async fn call_openai_compat_stream(
                     // Tool call deltas — accumulate by index
                     if let Some(ref tcs) = delta.tool_calls {
                         for tc in tcs {
-                            let idx = tc.index;
+                            let mut idx = tc.index;
+                            // Ollama fix: detect index reuse with different IDs.
+                            // Mirrors Python Ollama-specific fix (run_agent.py:6118).
+                            // When Ollama reuses index 0 but with a different tool_call ID,
+                            // redirect to a fresh slot so the prior tool call isn't overwritten.
+                            if let Some(ref new_id) = tc.id {
+                                if let Some(existing) = tc_state.get(&idx) {
+                                    if existing.id.as_ref().map_or(false, |eid| eid != new_id) {
+                                        // This index is being reused — find a fresh slot
+                                        let mut next_idx = idx + 1;
+                                        while tc_state.contains_key(&next_idx) {
+                                            next_idx += 1;
+                                        }
+                                        idx = next_idx;
+                                    }
+                                }
+                            }
                             let partial = tc_state.entry(idx).or_default();
                             let had_name_before = partial.name.is_some();
                             if let Some(ref id) = tc.id {

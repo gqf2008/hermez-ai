@@ -44,7 +44,11 @@ use hermez_prompt::{
     PromptBuilderConfig, CacheTtl,
 };
 use hermez_llm::reasoning::extract_reasoning;
+use hermez_tools::budget_config::BudgetConfig;
+use hermez_tools::checkpoint::CheckpointManager;
 use hermez_tools::registry::ToolRegistry;
+use hermez_tools::tool_result_storage;
+use hermez_prompt::subdirectory_hints::SubdirectoryHintTracker;
 use crate::plugin_system::global_hooks;
 
 use crate::budget::IterationBudget;
@@ -159,6 +163,15 @@ pub struct AIAgent {
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
     /// Session-scoped approval allowlist (command patterns approved with "approve_session").
     session_allowlist: Arc<Mutex<HashSet<String>>>,
+    /// Checkpoint manager for automatic filesystem snapshots before file-mutating ops.
+    checkpoint_mgr: CheckpointManager,
+    /// Subdirectory hint tracker for auto-discovering context files.
+    hint_tracker: SubdirectoryHintTracker,
+    /// Pending /steer text to inject after the next tool result.
+    pending_steer: Mutex<Option<String>>,
+    /// When the current provider entered rate-limit cooldown (epoch seconds).
+    rate_limited_until: Mutex<Option<f64>>,
+
 }
 
 impl AIAgent {
@@ -261,6 +274,10 @@ impl AIAgent {
             wasm_plugins,
             approval_handler: None,
             session_allowlist: Arc::new(Mutex::new(HashSet::new())),
+            checkpoint_mgr: CheckpointManager::new(false, 50),
+            hint_tracker: SubdirectoryHintTracker::new(None),
+            pending_steer: Mutex::new(None),
+            rate_limited_until: Mutex::new(None),
         })
     }
 
@@ -270,6 +287,73 @@ impl AIAgent {
     }
 
     /// Set the session context (session_id + session_db) for this turn.
+    /// Set pending steer text for injection after the next tool result.
+    pub fn set_steer(&self, text: &str) {
+        if !text.is_empty() { *self.pending_steer.lock() = Some(text.to_string()); }
+    }
+    fn take_pending_steer(&self) -> Option<String> { self.pending_steer.lock().take() }
+
+    fn inject_memory_block(api_messages: &mut Vec<Value>, memory_block: Option<&str>) {
+        let Some(mem) = memory_block else { return };
+        if mem.is_empty() { return; }
+        if let Some(last_user) = api_messages.iter_mut().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user")) {
+            if let Some(content) = last_user.get("content").and_then(Value::as_str) {
+                last_user["content"] = Value::String(format!("{}\n\n{}", mem, content));
+            }
+        }
+    }
+
+    fn is_stream_unsupported_error(msg: &str) -> bool {
+        let lower = msg.to_lowercase();
+        lower.contains("stream") && (lower.contains("not supported") || lower.contains("unsupported") || lower.contains("not available"))
+    }
+
+    fn is_destructive_command(cmd: &str) -> bool {
+        if cmd.is_empty() { return false; }
+        hermez_tools::approval::detect_dangerous_command(cmd).is_some()
+    }
+
+    async fn ensure_tool_checkpoint(&mut self, tool_name: &str, args: &Value) {
+        if tool_name == "write_file" || tool_name == "patch" {
+            if let Some(file_path) = args.get("path").and_then(Value::as_str) {
+                if let Some(parent) = std::path::Path::new(file_path).parent() {
+                    self.checkpoint_mgr.ensure_checkpoint(&parent.to_string_lossy(), &format!("before {tool_name}")).await;
+                }
+            }
+        } else if tool_name == "terminal" {
+            let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+            if Self::is_destructive_command(cmd) {
+                let terminal_cwd = std::env::var("TERMINAL_CWD").ok();
+                let workdir = args.get("workdir").and_then(Value::as_str).or_else(|| terminal_cwd.as_deref()).unwrap_or(".");
+                self.checkpoint_mgr.ensure_checkpoint(workdir, &format!("before terminal: {}", &cmd[..cmd.len().min(60)])).await;
+            }
+        }
+    }
+
+    fn persist_tool_result_if_large(&self, content: &str, tool_name: &str, tool_use_id: &str) -> String {
+        let threshold = self.tool_registry.get(tool_name).and_then(|entry| entry.max_result_size_chars);
+        let config = BudgetConfig::default();
+        tool_result_storage::maybe_persist_tool_result(content, tool_name, tool_use_id, threshold, &config).unwrap_or_else(|| content.to_string())
+    }
+
+    fn apply_turn_budget_on_results(&self, results: &mut Vec<Value>) {
+        let turn_budget = BudgetConfig::default().turn_budget;
+        let total: usize = results.iter().filter_map(|r| r.get("content").and_then(Value::as_str)).map(|s| s.len()).sum();
+        if total <= turn_budget { return; }
+        let mut indices: Vec<(usize, usize)> = results.iter().enumerate().filter_map(|(i, r)| Some((i, r.get("content").and_then(Value::as_str)?.len()))).collect();
+        indices.sort_by_key(|(_, len)| *len); indices.reverse();
+        let mut remaining = total;
+        for (idx, size) in indices {
+            if remaining <= turn_budget { break; }
+            let content = results[idx].get("content").and_then(Value::as_str).unwrap_or("");
+            let tool_use_id = results[idx].get("tool_call_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(replacement) = tool_result_storage::maybe_persist_tool_result(content, "budget", tool_use_id, Some(0), &BudgetConfig::default()) {
+                remaining = remaining.saturating_sub(size).saturating_add(replacement.len());
+                results[idx]["content"] = serde_json::json!(replacement);
+            }
+        }
+    }
+
     /// Used by the gateway to bind each chat to its own persistent session.
     pub fn set_session_context(&mut self, session_id: &str, session_db: Option<Arc<hermez_state::SessionDB>>) {
         self.config.session_id = Some(session_id.to_string());
@@ -428,6 +512,8 @@ impl AIAgent {
         // Mirrors Python: `while (budget remaining > 0) or self._budget_grace_call`
         loop {
             let should_continue = if self.budget.remaining() > 0 {
+            self.checkpoint_mgr.new_turn();
+
                 self.budget.consume()
             } else if self.budget.take_grace_call() {
                 // Grace call — budget was exhausted but we get one more chance.
@@ -550,6 +636,17 @@ impl AIAgent {
                 self.config.base_url.as_deref(),
                 &hook_messages,
             );
+        // Rate-limit cooldown: sleep before API call if provider is throttled.
+        let cooldown = *self.rate_limited_until.lock();
+        if let Some(until) = cooldown {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+            if now < until {
+                tracing::warn!("Rate-limit cooldown: waiting {:.1}s", until - now);
+                tokio::time::sleep(std::time::Duration::from_secs_f64(until - now)).await;
+            }
+            *self.rate_limited_until.lock() = None;
+        }
+
             let call_start = std::time::Instant::now();
 
             // Choose streaming path when enabled and consumers are registered.

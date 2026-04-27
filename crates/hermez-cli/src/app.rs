@@ -14,6 +14,7 @@ use hermez_core::{HermezConfig, Result};
 use hermez_prompt::ToolUseEnforcement;
 use hermez_tools::registry::ToolRegistry;
 use hermez_tools::register_all_tools;
+use crate::slash_commands::BusyMode;
 
 /// Custom reedline prompt that uses the active skin's branding.
 struct SkinPrompt {
@@ -313,6 +314,7 @@ impl HermezApp {
             // Handle slash commands
             let mut should_exit = false;
             let mut agent_turn_prompt: Option<String> = None;
+            let mut busy_mode = BusyMode::Queue;
 
             if trimmed.starts_with('/') {
                 let without_slash = &trimmed[1..];
@@ -331,6 +333,7 @@ impl HermezApp {
                     session_title: &mut session_title,
                     yolo_mode: &mut yolo_mode,
                     should_exit: &mut should_exit,
+                    busy_mode: &mut busy_mode,
                 };
 
                 match crate::slash_commands::dispatch(cmd, args, &mut ctx) {

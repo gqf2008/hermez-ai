@@ -9,7 +9,7 @@ pub mod tool_result;
 pub mod toolsets_def;
 
 // Simple tools
-pub(crate) mod budget_config;
+pub mod budget_config;
 pub(crate) mod interrupt;
 pub(crate) mod url_safety;
 pub(crate) mod website_policy;
@@ -21,7 +21,7 @@ pub(crate) mod patch_parser;
 pub(crate) mod osv_check;
 pub(crate) mod clipboard;
 pub(crate) mod credential_files;
-pub(crate) mod tool_result_storage;
+pub mod tool_result_storage;
 pub(crate) mod openrouter_client;
 pub(crate) mod transcription;
 
@@ -29,7 +29,7 @@ pub(crate) mod transcription;
 pub mod approval;
 pub(crate) mod file_ops;
 pub(crate) mod terminal;
-pub(crate) mod process_reg;
+pub mod process_reg;
 pub(crate) mod web;
 #[cfg(feature = "browser")]
 pub(crate) mod browser;
@@ -53,7 +53,7 @@ pub(crate) mod clarify;
 pub(crate) mod session_search;
 pub(crate) mod homeassistant;
 pub(crate) mod send_message;
-pub(crate) mod checkpoint;
+pub mod checkpoint;
 pub(crate) mod shell_file_ops;
 pub(crate) mod credentials;
 pub(crate) mod rl_training;

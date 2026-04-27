@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
@@ -110,8 +110,6 @@ impl AgentRegistry {
     /// Register a new agent. Returns the assigned agent_id.
     pub async fn register(&self, req: RegisterRequest) -> String {
         let agent_id = uuid::Uuid::new_v4().to_string();
-        let now = Instant::now().elapsed().as_secs();
-        // Use chrono for real timestamp
         let now = chrono::Utc::now().timestamp_millis() as u64;
 
         let agent = RegisteredAgent {

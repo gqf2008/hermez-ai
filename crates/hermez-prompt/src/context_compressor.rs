@@ -148,6 +148,23 @@ impl crate::context_engine::ContextEngine for ContextCompressor {
     fn threshold_tokens(&self) -> usize {
         self.threshold_tokens()
     }
+
+    fn update_model(&mut self, model: &str, context_length: Option<usize>) {
+        // Recalculate budgets for the new model's context window.
+        // Mirrors Python ContextCompressor.update_model()
+        // (context_compressor.py:301-327).
+        let new_context_length = context_length
+            .unwrap_or_else(|| super::context_compressor::estimate_context_length(model));
+        self.context_length = new_context_length;
+        self.threshold_tokens =
+            (new_context_length as f64 * self.config.threshold_percent) as usize;
+        self.tail_token_budget =
+            (self.threshold_tokens as f64 * self.config.summary_target_ratio) as usize;
+        self.max_summary_tokens =
+            ((new_context_length as f64 * 0.05) as usize).min(SUMMARY_TOKENS_CEILING);
+        self.config.model = model.to_string();
+        self.config.config_context_length = Some(new_context_length);
+    }
 }
 
 impl ContextCompressor {
@@ -397,7 +414,24 @@ impl ContextCompressor {
             );
             tracing::info!("Compression #{} complete", self.compression_count);
 
-            // Anti-thrashing: track effectiveness
+            // Anti-thrashing: track effectiveness (MUST run outside quiet_mode
+            // guard — mirrors Python context_compressor.py:1288-1294).
+            if savings_pct < 10.0 {
+                self.ineffective_compression_count += 1;
+            } else {
+                self.ineffective_compression_count = 0;
+            }
+            self.last_compression_savings_pct = savings_pct;
+        } else {
+            // Always track anti-thrashing even in quiet mode.
+            // Without this, runaway compression loops happen in gateway mode.
+            let new_estimate = estimate_messages_tokens(&compressed);
+            let saved = display_tokens.saturating_sub(new_estimate);
+            let savings_pct = if display_tokens > 0 {
+                (saved as f64 / display_tokens as f64) * 100.0
+            } else {
+                100.0
+            };
             if savings_pct < 10.0 {
                 self.ineffective_compression_count += 1;
             } else {
@@ -499,11 +533,10 @@ impl ContextCompressor {
             if content.len() < 200 {
                 continue;
             }
-            // Simple hash: first 12 hex chars of content length + first 50 chars checksum
-            let checksum: usize = content.chars().take(50).map(|c| c as usize).sum();
-            let h = format!("{:x}", content.len() ^ checksum);
-            let h = &h[..12.min(h.len())].to_string();
-            if content_hashes.contains_key(h) {
+            // Hash: content prefix + length for collision-resistant dedup
+            let prefix: String = content.chars().take(200).collect();
+            let h = format!("{:x}_{}", prefix.len() ^ content.len(), prefix.len().wrapping_add(content.len()));
+            if content_hashes.contains_key(&h) {
                 // This is an older duplicate — replace with back-reference
                 result[i] = serde_json::json!({
                     "role": "tool",
@@ -559,8 +592,13 @@ impl ContextCompressor {
                 if let Some(args) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
                     if let Some(args_str) = args.as_str() {
                         if args_str.len() > 500 {
-                            let truncated = format!("{}...[truncated]", &args_str[..200]);
-                            *args = Value::String(truncated);
+                            // JSON-aware truncation: parse, shrink long values, re-serialize
+                            if let Ok(mut v) = serde_json::from_str::<Value>(args_str) {
+                                shrink_json_values(&mut v, 200);
+                                *args = serde_json::to_value(v).unwrap_or_else(|_| serde_json::json!("{}...[truncated]"));
+                            } else {
+                                *args = Value::String(format!("{}...[truncated]", &args_str[..200]));
+                            }
                             modified = true;
                         }
                     }
@@ -621,6 +659,18 @@ impl ContextCompressor {
             }
             accumulated += msg_tokens;
             cut_idx = i;
+        }
+
+        // Ensure the last user message is always in the protected tail.
+        // Mirrors Python _ensure_last_user_message_in_tail() (context_compressor.py:1007-1052).
+        // Without this, the active task disappears into the summary when the
+        // last user message falls before the token-budget cut point.
+        if let Some(last_user_idx) = messages.iter().rposition(|m| {
+            m.get("role").and_then(Value::as_str) == Some("user")
+        }) {
+            if last_user_idx > head_end && cut_idx > last_user_idx {
+                cut_idx = last_user_idx;
+            }
         }
 
         // Ensure at least min_tail messages are protected
@@ -742,6 +792,10 @@ impl ContextCompressor {
         // "Resolved Questions" and "Pending User Asks" sections are added.
         let template_sections = format!(
             "\
+## Active Task
+[THE SINGLE MOST IMPORTANT FIELD: copy the user's most recent request verbatim here. \
+Do NOT summarize or paraphrase. This is what the next assistant must work on.]
+
 ## Goal
 [What the user is trying to accomplish]
 
@@ -1133,6 +1187,22 @@ fn truncate_content_for_summary(content: &str) -> String {
     )
 }
 
+/// Recursively shrink long string values in JSON values for summarization.
+fn shrink_json_values(value: &mut Value, max_len: usize) {
+    match value {
+        Value::String(s) if s.len() > max_len => {
+            *s = format!("{}...[truncated]", &s[..max_len]);
+        }
+        Value::Array(arr) => {
+            for v in arr { shrink_json_values(v, max_len); }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() { shrink_json_values(v, max_len); }
+        }
+        _ => {}
+    }
+}
+
 /// Normalize summary text with prefix.
 #[cfg(test)]
 fn with_summary_prefix(summary: &str) -> String {
@@ -1168,7 +1238,7 @@ fn estimate_messages_tokens(messages: &[Value]) -> usize {
 ///
 /// This is a simplified version. In production, this would query
 /// model metadata or use a lookup table.
-fn estimate_context_length(model: &str) -> usize {
+pub fn estimate_context_length(model: &str) -> usize {
     // Default fallback
     if model.contains("opus") || model.contains("claude-3") {
         200_000

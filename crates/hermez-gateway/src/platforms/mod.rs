@@ -27,3 +27,4 @@ pub mod wecom_callback;
 pub mod qqbot;
 pub mod weixin;
 pub mod whatsapp;
+pub mod whatsapp_identity;

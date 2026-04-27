@@ -13,6 +13,7 @@ pub mod providers;
 pub mod resolver;
 pub mod security;
 pub mod session;
+pub mod supervisor;
 
 use std::sync::Arc;
 
@@ -481,6 +482,11 @@ async fn cloud_navigate_async(
     })?;
 
     SESSION_MANAGER.register_cloud(&task_id, &session);
+
+    // Start CDP supervisor for dialog handling
+    if let Some(ref cdp) = session.cdp_url {
+        let _ = supervisor::start_supervisor(&task_id, cdp, Default::default());
+    }
 
     let output = tokio::process::Command::new("agent-browser")
         .arg("--cdp")

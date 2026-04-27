@@ -163,7 +163,7 @@ fuzzy-matcher = "0.3"
 minijinja = { version = "2", features = ["loader"] }
 
 # MCP
-rmcp = "0.1"
+rmcp = "1"
 
 # Docker
 bollard = "0.18"

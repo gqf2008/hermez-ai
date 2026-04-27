@@ -1078,6 +1078,10 @@ async fn handle_webhook(
             chat_topic: None,
             user_id_alt: None,
             chat_id_alt: if chat_identifier.is_empty() { None } else { Some(chat_identifier.clone()) },
+            guild_id: None,
+            parent_chat_id: None,
+            message_id: None,
+            is_bot: None,
         };
 
         let content = if media_urls.is_empty() {

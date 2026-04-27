@@ -71,7 +71,20 @@ impl SessionDB {
             let mut guard = conn.lock();
             init_schema(&mut guard)?;
         }
-        Ok(Self { conn, write_count })
+        // Auto-prune old sessions and VACUUM on startup.
+        // Mirrors Python auto-prune + VACUUM at startup (session.py, commit b8663813).
+        let db = Self { conn: Arc::clone(&conn), write_count: Arc::clone(&write_count) };
+        if let Ok(pruned) = db.prune_sessions(30, None) {
+            if pruned > 0 {
+                tracing::info!("Auto-pruned {} stale session(s) on startup", pruned);
+            }
+        }
+        {
+            let guard = db.conn.lock();
+            let _ = guard.execute_batch("PRAGMA optimize;");
+        }
+
+        Ok(db)
     }
 
     pub fn open_default() -> Result<Self, StateError> {

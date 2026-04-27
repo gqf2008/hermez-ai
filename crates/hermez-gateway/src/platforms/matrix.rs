@@ -687,8 +687,7 @@ async fn route_matrix_message(
                     user_name: Some(display_name.to_string()),
                     thread_id: thread_id.map(|s| s.to_string()),
                     chat_topic: None,
-                    user_id_alt: None,
-                    chat_id_alt: None,
+                    ..Default::default()
                 };
                 session_store.reset_session_for(&source);
                 let _ = adapter.send_text(chat_id, "Session reset: conversation context grew too large. Starting fresh.").await;

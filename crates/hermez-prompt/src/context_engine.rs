@@ -62,6 +62,11 @@ pub trait ContextEngine: Send + Sync {
     /// Used by `AIAgent` to emit context pressure warnings before
     /// the threshold is actually exceeded.
     fn threshold_tokens(&self) -> usize;
+
+    /// Recalculate budgets when the model changes (e.g., /model, fallback).
+    fn update_model(&mut self, model: &str, context_length: Option<usize>) {
+        let _ = (model, context_length);
+    }
 }
 
 /// Factory for creating context engines by name.

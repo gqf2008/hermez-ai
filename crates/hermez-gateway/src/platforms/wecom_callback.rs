@@ -646,8 +646,7 @@ async fn handle_callback(
                         user_name: None,
                         thread_id: None,
                         chat_topic: None,
-                        user_id_alt: None,
-                        chat_id_alt: None,
+                        ..Default::default()
                     };
                     session_store.reset_session_for(&source);
                     let _ = state_for_send

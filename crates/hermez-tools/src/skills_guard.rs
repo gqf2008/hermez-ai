@@ -38,6 +38,11 @@ pub struct ScanResult {
     pub has_symlink_escapes: bool,
     pub has_invisible_unicode: bool,
     pub trust_level: String,
+    pub has_too_many_files: bool,
+    pub has_excessive_size: bool,
+    pub has_oversized_files: bool,
+    pub has_binary_files: bool,
+    pub has_executables: bool,
 }
 
 /// Threat pattern: regex + category + severity.
@@ -194,24 +199,98 @@ pub fn has_invisible_unicode(s: &str) -> bool {
     })
 }
 
-/// Check structure of a skill directory for symlink escapes.
+/// Limits for structural checks.
+const MAX_FILE_COUNT: usize = 50;
+const MAX_TOTAL_SIZE: u64 = 1024 * 1024; // 1 MB
+const MAX_SINGLE_FILE_SIZE: u64 = 256 * 1024; // 256 KB
+
+/// Check structure of a skill directory for symlink escapes, file count,
+/// total size, single file size, binary files, and executable permissions.
+/// Mirrors Python skills_guard structural checks (tools/skills_guard.py).
 fn check_structure(skill_dir: &Path, result: &mut ScanResult) {
-    if let Ok(entries) = std::fs::read_dir(skill_dir) {
+    let mut file_count = 0usize;
+    let mut total_size = 0u64;
+    let mut walk = vec![skill_dir.to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path
-                .symlink_metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
+            let meta = match path.symlink_metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            // Symlink escape check
+            if meta.file_type().is_symlink() {
                 if let Ok(target) = path.canonicalize() {
                     if !target.starts_with(skill_dir) {
                         result.has_symlink_escapes = true;
                     }
                 }
+                continue;
+            }
+
+            if meta.is_dir() {
+                walk.push(path);
+                continue;
+            }
+
+            if meta.is_file() {
+                file_count += 1;
+                total_size += meta.len();
+
+                // Single file size check
+                if meta.len() > MAX_SINGLE_FILE_SIZE {
+                    result.has_oversized_files = true;
+                }
+
+                // Binary file detection
+                if is_binary_file(&path) {
+                    result.has_binary_files = true;
+                }
+
+                // Executable permission check
+                if is_executable(&meta) {
+                    result.has_executables = true;
+                }
             }
         }
     }
+
+    if file_count > MAX_FILE_COUNT {
+        result.has_too_many_files = true;
+    }
+    if total_size > MAX_TOTAL_SIZE {
+        result.has_excessive_size = true;
+    }
+}
+
+/// Check if a file is likely binary by reading the first 512 bytes.
+fn is_binary_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 512];
+    match file.read(&mut buf) {
+        Ok(n) => buf[..n].iter().any(|&b| b == 0),
+        Err(_) => false,
+    }
+}
+
+/// Check if file metadata indicates executable permission.
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Compute SHA-256 content hash of all files in a directory.

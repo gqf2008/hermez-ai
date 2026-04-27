@@ -221,6 +221,11 @@ impl ToolRegistry {
         self.tools.read().keys().cloned().collect()
     }
 
+    /// Remove a tool by name.
+    pub fn remove(&mut self, name: &str) {
+        self.tools.write().remove(name);
+    }
+
     /// List all registered toolsets.
     pub fn list_toolsets(&self) -> Vec<String> {
         self.toolset_checks.read().keys().cloned().collect()

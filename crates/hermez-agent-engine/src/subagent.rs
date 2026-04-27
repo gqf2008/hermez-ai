@@ -19,8 +19,15 @@ use hermez_tools::registry::ToolRegistry;
 
 use crate::agent::{AIAgent, AgentConfig, ExitReason};
 
-/// Maximum delegation depth. 2 means parent → child only.
-const MAX_DEPTH: u32 = 2;
+/// Maximum delegation depth. 3 means parent → child → grandchild.
+/// Configurable via HERMEZ_DELEGATE_MAX_DEPTH env var (1-5, default 3).
+fn max_delegate_depth() -> u32 {
+    std::env::var("HERMEZ_DELEGATE_MAX_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .clamp(1, 5)
+}
 
 /// Tools blocked for child agents.
 const BLOCKED_TOOLS: &[&str] = &[
@@ -73,7 +80,7 @@ impl SubagentManager {
 
     /// Check if spawning another child would exceed depth limit.
     pub fn can_delegate(&self) -> bool {
-        self.depth < MAX_DEPTH
+        self.depth < max_delegate_depth()
     }
 
     /// Execute delegate_task tool call — spawn child agents concurrently.
@@ -83,10 +90,10 @@ impl SubagentManager {
         parent_registry: Arc<ToolRegistry>,
     ) -> Vec<SubagentResult> {
         if !self.can_delegate() {
-            tracing::warn!("Subagent delegation: depth limit {} reached", MAX_DEPTH);
+            tracing::warn!("Subagent delegation: depth limit {} reached", max_delegate_depth());
             return vec![SubagentResult {
                 goal: String::new(),
-                response: format!("Maximum delegation depth ({MAX_DEPTH}) reached."),
+                response: format!("Maximum delegation depth ({}) reached.", max_delegate_depth()),
                 exit_reason: ExitReason::DepthLimit,
                 api_calls: 0,
             }];
@@ -332,7 +339,10 @@ mod tests {
         let mgr = SubagentManager::new(1, interrupt.clone(), 50);
         assert!(mgr.can_delegate());
 
-        let mgr = SubagentManager::new(2, interrupt, 50);
+        let mgr = SubagentManager::new(2, interrupt.clone(), 50);
+        assert!(mgr.can_delegate());
+
+        let mgr = SubagentManager::new(3, interrupt, 50);
         assert!(!mgr.can_delegate());
     }
 
@@ -377,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_delegation_blocked_at_depth_limit() {
         let interrupt = Arc::new(AtomicBool::new(false));
-        let mgr = Arc::new(SubagentManager::new(2, interrupt, 50));
+        let mgr = Arc::new(SubagentManager::new(3, interrupt, 50));
         let registry = Arc::new(ToolRegistry::new());
         let args = serde_json::json!({ "goal": "test" });
         let results = mgr.execute_delegation(args, registry).await;
@@ -458,7 +468,7 @@ mod tests {
             "goal": "test",
             "toolsets": ["core", "terminal"]
         });
-        // This should proceed (depth 0 < MAX_DEPTH) but child toolsets
+        // This should proceed (depth 0 < max_delegate_depth()) but child toolsets
         // should have delegate_task, clarify, memory, etc. removed
         let results = mgr.execute_delegation(args, registry).await;
         // Child agent will fail (no API key) but the delegation itself should work
@@ -604,6 +614,6 @@ mod tests {
 
     #[test]
     fn test_max_depth_constant() {
-        assert_eq!(MAX_DEPTH, 2);
+        assert_eq!(max_delegate_depth(), 3);
     }
 }
